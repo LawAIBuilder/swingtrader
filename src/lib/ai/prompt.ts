@@ -1,0 +1,6 @@
+import type { CatalystEvidence } from '@/lib/catalysts/evidence';
+import { compactEvidenceForPrompt } from '@/lib/catalysts/evidence';
+
+export function buildAnalysisPrompt(evidence: CatalystEvidence): string {
+  return `You are analyzing a long-only short-term bounce setup for a paper-trading research system.\n\nRules:\n- Classify the candidate as BUY, PASS, or AVOID.\n- BUY means the selloff looks overextended and the evidence packet does not show an obvious permanent-impairment or dilution catalyst.\n- PASS means unclear, weak, or insufficient evidence.\n- AVOID means the selloff appears tied to offering/dilution, fraud, bankruptcy, severe guidance impairment, dividend suspension, or other high-risk catalyst.\n- Do not invent facts that are not in the evidence packet.\n- The LLM does not set stops, targets, or position size. Code handles risk.\n- Return ONLY valid JSON matching the schema below. No markdown.\n\nJSON schema:\n{\n  "tier": "BUY" | "PASS" | "AVOID",\n  "thesis": "20-500 chars",\n  "selloff_type": "earnings" | "offering" | "downgrade" | "guidance" | "sector" | "macro" | "technical" | "unknown",\n  "day_of_drop": 1-10,\n  "invalidation_reason": "10-200 chars, qualitative only",\n  "risk_flags": ["short strings"],\n  "confidence_in_tier": "high" | "medium" | "low"\n}\n\nEvidence packet:\n${compactEvidenceForPrompt(evidence)}`;
+}

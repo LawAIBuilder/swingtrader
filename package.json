@@ -1,0 +1,54 @@
+{
+  "name": "bounce-trader-starter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "dev:web": "next dev",
+    "dev:worker": "ENABLE_WEB=false tsx watch src/server.ts",
+    "build": "next build",
+    "start": "NODE_ENV=production tsx src/server.ts",
+    "start:railway": "NODE_ENV=production tsx src/server.ts",
+    "jobs:screener": "tsx src/cli/run-screener.ts",
+    "jobs:outcomes": "tsx src/cli/run-outcomes.ts",
+    "jobs:summary": "tsx src/cli/run-summary.ts",
+    "smoke:historical": "tsx src/cli/smoke-historical.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:types": "supabase gen types typescript --linked > src/types/database.generated.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.95.1",
+    "@supabase/supabase-js": "^2.75.0",
+    "date-fns": "^3.6.0",
+    "express": "^4.19.2",
+    "next": "^15.5.0",
+    "node-cron": "^3.0.3",
+    "p-limit": "^6.2.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "resend": "^4.0.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^9.0.0",
+    "eslint-config-next": "^15.5.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
