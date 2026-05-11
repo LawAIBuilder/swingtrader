@@ -267,10 +267,21 @@ ALTER VIEW bounce_trader.v_basic_stats_by_tier SET (security_invoker = on);
 ALTER VIEW bounce_trader.v_basic_stats_by_screen SET (security_invoker = on);
 ALTER VIEW bounce_trader.v_recent_run_logs SET (security_invoker = on);
 
+-- security_invoker views require BOTH a permissive RLS policy AND a
+-- table-level GRANT on the underlying tables. Without the GRANT, anon hits
+-- 42501 / "permission denied for table candidates" even when the policy
+-- evaluates to true. Service role bypasses RLS and grants by default.
+GRANT SELECT ON bounce_trader.candidates TO anon, authenticated;
+GRANT SELECT ON bounce_trader.pre_flags TO anon, authenticated;
+GRANT SELECT ON bounce_trader.analyses TO anon, authenticated;
+GRANT SELECT ON bounce_trader.paper_trades TO anon, authenticated;
+GRANT SELECT ON bounce_trader.trade_progression TO anon, authenticated;
+GRANT SELECT ON bounce_trader.run_logs TO anon, authenticated;
+
 -- Anon-readable RLS policies on the underlying tables for the columns/rows
--- the views surface. Without these, security_invoker + RLS + no anon grants
--- on tables would block the views. We allow read-only access to the rows
--- needed by the dashboard. Service role still bypasses RLS for writes.
+-- the views surface. We allow read-only access to the rows needed by the
+-- dashboard. catalysts and wash_sale_lockout are intentionally NOT granted
+-- to anon and have no policy, so they remain admin-only.
 DROP POLICY IF EXISTS anon_read_candidates ON bounce_trader.candidates;
 CREATE POLICY anon_read_candidates ON bounce_trader.candidates
   FOR SELECT TO anon, authenticated USING (true);
