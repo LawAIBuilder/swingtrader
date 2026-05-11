@@ -61,17 +61,24 @@ export async function runScreener(runDate = todayInNewYork(), options: RunScreen
   const requireSettled = options.requireSettled ?? true;
   const client = options.client ?? getMarketDataClient();
   const dates = businessDatesBack(runDate, 32);
-  const grouped = [] as Array<{ date: string; bars: DailyBar[] }>;
 
-  for (const date of dates) {
-    try {
-      const bars = await client.getGroupedDailyBars(date);
-      grouped.push({ date, bars });
-    } catch {
-      // Holidays and provider gaps are expected. Keep going.
-      grouped.push({ date, bars: [] });
-    }
-  }
+  // Fan out the 32-day lookback across the configured concurrency cap. Order
+  // matters downstream (chooseLatestDataDate inspects the trailing element), so
+  // results are reassembled in date order regardless of completion order.
+  const groupedLimit = pLimit(env.groupedBarsConcurrency);
+  const grouped: Array<{ date: string; bars: DailyBar[] }> = await Promise.all(
+    dates.map((date) =>
+      groupedLimit(async () => {
+        try {
+          const bars = await client.getGroupedDailyBars(date);
+          return { date, bars };
+        } catch {
+          // Holidays and provider gaps are expected. Keep going.
+          return { date, bars: [] };
+        }
+      })
+    )
+  );
 
   const dataDate = chooseLatestDataDate(grouped);
   if (requireSettled && dataDate !== runDate) {

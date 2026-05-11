@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { isAuthorizedCron } from '@/app/api/_auth';
+import { jobErrorResponse, readJobInvocation } from '@/app/api/_jobRequest';
 import { runScreenerJob } from '@/jobs/screener';
 
 // Job runs against Polygon + Anthropic + Supabase. Large universes can exceed
@@ -13,15 +14,12 @@ async function handle(req: NextRequest) {
   if (!isAuthorizedCron(req)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
+  const invocation = await readJobInvocation(req);
   try {
-    const body = req.method === 'POST' ? await req.json().catch(() => ({})) : {};
-    const result = await runScreenerJob(body?.runDate);
+    const result = await runScreenerJob(invocation);
     return NextResponse.json(result);
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    return jobErrorResponse('screener', invocation.runDate, err);
   }
 }
 

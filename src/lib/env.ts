@@ -60,7 +60,13 @@ const EnvSchema = z.object({
   SCREEN_B_5D_DROP_PCT: z.string().optional(),
   SCREEN_B_DRAWDOWN_20D_PCT: z.string().optional(),
   TIME_STOP_DAYS: z.string().optional(),
-  ENTRY_MODE: z.string().optional()
+  ENTRY_MODE: z.string().optional(),
+
+  FETCH_TIMEOUT_MS: z.string().optional(),
+  ANTHROPIC_TIMEOUT_MS: z.string().optional(),
+  GROUPED_BARS_CONCURRENCY: z.string().optional(),
+  ANTHROPIC_CONCURRENCY: z.string().optional(),
+  RUN_LOCK_TTL_MS: z.string().optional()
 }).passthrough();
 
 const raw = EnvSchema.parse(process.env);
@@ -108,7 +114,21 @@ export const env = {
   screenB5dDropPct: parseNum(raw.SCREEN_B_5D_DROP_PCT, -12),
   screenBDrawdown20dPct: parseNum(raw.SCREEN_B_DRAWDOWN_20D_PCT, -15),
   timeStopDays: parseNum(raw.TIME_STOP_DAYS, 5),
-  entryMode: parseEntryMode(raw.ENTRY_MODE)
+  entryMode: parseEntryMode(raw.ENTRY_MODE),
+
+  // PR 2: bounded latencies and concurrency for external IO.
+  // Per-request HTTP timeout for Polygon and Alpaca calls.
+  fetchTimeoutMs: parseNum(raw.FETCH_TIMEOUT_MS, 15_000),
+  // Per-request timeout passed to the Anthropic SDK.
+  anthropicTimeoutMs: parseNum(raw.ANTHROPIC_TIMEOUT_MS, 30_000),
+  // Concurrency cap for the lookback grouped-bar fetch in the screener.
+  groupedBarsConcurrency: parseNum(raw.GROUPED_BARS_CONCURRENCY, 4),
+  // Concurrency cap for Anthropic messages.create. Wraps every analyzer call so
+  // future parallel candidate processing cannot exceed this.
+  anthropicConcurrency: parseNum(raw.ANTHROPIC_CONCURRENCY, 2),
+  // Stale-lock TTL. A 'running' run_logs row older than this is treated as a
+  // crashed prior run and is reaped before a new run acquires the lock.
+  runLockTtlMs: parseNum(raw.RUN_LOCK_TTL_MS, 600_000)
 };
 
 export function requireEnv(name: string, value: string | undefined): string {

@@ -1,4 +1,5 @@
 import { env, requireEnv } from '@/lib/env';
+import { timedFetch } from '@/lib/utils/timed-fetch';
 import type { DailyBar } from '@/types/app';
 
 interface AlpacaBarsResponse {
@@ -37,12 +38,13 @@ export class AlpacaDataClient {
     url.searchParams.set('adjustment', 'all');
     url.searchParams.set('feed', 'iex');
 
-    const res = await fetch(url, {
+    const res = await timedFetch(url, {
       headers: {
         accept: 'application/json',
         'APCA-API-KEY-ID': this.keyId,
         'APCA-API-SECRET-KEY': this.secretKey
-      }
+      },
+      timeoutMs: env.fetchTimeoutMs
     });
     if (!res.ok) throw new Error(`Alpaca bars failed ${res.status}: ${res.statusText}`);
     const json = (await res.json()) as AlpacaBarsResponse;

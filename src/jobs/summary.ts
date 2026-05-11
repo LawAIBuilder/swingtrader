@@ -12,8 +12,15 @@ export interface SummaryJobResult {
   reason?: string;
 }
 
-export async function runDailySummaryJob(runDate = todayInNewYork()): Promise<SummaryJobResult> {
-  return withRunLog('daily_summary', runDate, async () => {
+export interface RunDailySummaryJobOptions {
+  runDate?: string;
+  force?: boolean;
+}
+
+export async function runDailySummaryJob(options: RunDailySummaryJobOptions = {}): Promise<SummaryJobResult> {
+  const runDate = options.runDate ?? todayInNewYork();
+  const force = options.force ?? false;
+  return withRunLog('daily_summary', { runDate, force }, async () => {
     const markdown = await renderDailySummary(runDate);
     const email = await sendEmail({ subject: `Bounce Trader Daily Summary - ${runDate}`, markdown });
     if (email.sent) return { runDate, emailed: true };

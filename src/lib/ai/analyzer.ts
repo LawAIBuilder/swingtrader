@@ -1,8 +1,30 @@
 import Anthropic from '@anthropic-ai/sdk';
+import pLimit from 'p-limit';
 import { env } from '@/lib/env';
 import type { CatalystEvidence } from '@/lib/catalysts/evidence';
 import { buildAnalysisPrompt } from './prompt';
 import { AnalysisSchema, type AnalysisOutput } from './schema';
+
+// Single shared cap for concurrent Anthropic calls. The screener loop is
+// currently sequential, so this is effectively a no-op at one-call-at-a-time;
+// it exists so any future parallelization (e.g. parallel candidate processing
+// in PR 3) cannot exceed env.anthropicConcurrency without additional work.
+let cachedAnthropicLimit: ReturnType<typeof pLimit> | null = null;
+function getAnthropicLimit() {
+  if (!cachedAnthropicLimit) cachedAnthropicLimit = pLimit(env.anthropicConcurrency);
+  return cachedAnthropicLimit;
+}
+
+let cachedClient: Anthropic | null = null;
+function getAnthropicClient(): Anthropic {
+  if (cachedClient) return cachedClient;
+  cachedClient = new Anthropic({
+    apiKey: env.anthropicApiKey,
+    timeout: env.anthropicTimeoutMs,
+    maxRetries: 0
+  });
+  return cachedClient;
+}
 
 export interface AnalysisResult {
   output: AnalysisOutput;
@@ -86,14 +108,15 @@ export async function analyzeWithClaude(evidence: CatalystEvidence): Promise<Ana
     };
   }
 
-  const client = new Anthropic({ apiKey: env.anthropicApiKey });
+  const client = getAnthropicClient();
+  const limit = getAnthropicLimit();
   const prompt = buildAnalysisPrompt(evidence);
   let lastRaw = '';
   let lastReason = 'unknown';
   let tokensUsed: number | null = null;
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const message = await client.messages.create({
+    const message = await limit(() => client.messages.create({
       model: modelName,
       max_tokens: 800,
       temperature: 0,
@@ -104,7 +127,7 @@ export async function analyzeWithClaude(evidence: CatalystEvidence): Promise<Ana
           content: attempt === 0 ? prompt : `${prompt}\n\nYour prior response failed JSON validation. Return ONLY the JSON object, with no commentary.`
         }
       ]
-    });
+    }));
 
     tokensUsed = (message.usage?.input_tokens ?? 0) + (message.usage?.output_tokens ?? 0);
     lastRaw = message.content

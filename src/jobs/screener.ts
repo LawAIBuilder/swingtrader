@@ -163,8 +163,14 @@ async function createPaperTrade(candidate: ScreenedCandidate, candidateRow: Cand
   return true;
 }
 
-export async function runScreenerJob(runDate?: string): Promise<ScreenerJobResult> {
-  return withRunLog('screener', runDate, async () => {
+export interface RunScreenerJobOptions {
+  runDate?: string;
+  force?: boolean;
+}
+
+export async function runScreenerJob(options: RunScreenerJobOptions = {}): Promise<ScreenerJobResult> {
+  const { runDate, force } = options;
+  return withRunLog('screener', { runDate, force }, async () => {
     const marketClient = getMarketDataClient();
     let result;
     try {

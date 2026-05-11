@@ -123,11 +123,21 @@ CREATE TABLE IF NOT EXISTS bounce_trader.run_logs (
   id BIGSERIAL PRIMARY KEY,
   run_date DATE NOT NULL,
   job_name TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('success', 'partial', 'failed')),
+  status TEXT NOT NULL CHECK (status IN ('running', 'success', 'partial', 'failed', 'skipped')),
   details JSONB,
   duration_ms INT,
-  ran_at TIMESTAMPTZ DEFAULT NOW()
+  forced BOOLEAN NOT NULL DEFAULT FALSE,
+  ran_at TIMESTAMPTZ DEFAULT NOW(),
+  finished_at TIMESTAMPTZ
 );
+
+-- PR 2 run lock: at most one row per (run_date, job_name) may be in 'running'
+-- state. Insert against this constraint = atomic lock acquisition. Completed
+-- runs (success/partial/failed/skipped) coexist with future running rows, so
+-- the index is partial.
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_run_logs_running_per_jobdate
+  ON bounce_trader.run_logs(run_date, job_name)
+  WHERE status = 'running';
 
 CREATE TABLE IF NOT EXISTS bounce_trader.wash_sale_lockout (
   ticker TEXT NOT NULL,

@@ -138,8 +138,15 @@ async function applyDayBar(trade: FinalizedPaperTrade, bar: DailyBar): Promise<A
   return { closed: false, ambiguous: sim.isAmbiguous };
 }
 
-export async function runOutcomeTrackerJob(runDate = todayInNewYork()): Promise<OutcomeJobResult> {
-  return withRunLog('outcome_tracker', runDate, async () => {
+export interface RunOutcomeTrackerJobOptions {
+  runDate?: string;
+  force?: boolean;
+}
+
+export async function runOutcomeTrackerJob(options: RunOutcomeTrackerJobOptions = {}): Promise<OutcomeJobResult> {
+  const runDate = options.runDate ?? todayInNewYork();
+  const force = options.force ?? false;
+  return withRunLog('outcome_tracker', { runDate, force }, async () => {
     const supabase = getSupabaseAdmin();
     const marketClient = getMarketDataClient();
     const { data, error } = await supabase

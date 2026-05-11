@@ -135,9 +135,11 @@ When the server is running:
 ```bash
 curl -X POST http://localhost:3000/jobs/screener \
   -H "content-type: application/json" \
-  -H "x-cron-secret: $CRON_SECRET" \
+  -H "authorization: Bearer $CRON_SECRET" \
   -d '{"runDate":"2026-05-11"}'
 ```
+
+The legacy `x-cron-secret: $CRON_SECRET` header is also accepted.
 
 Available endpoints:
 
@@ -147,6 +149,30 @@ Available endpoints:
 - `GET /health`
 
 If `CRON_SECRET` is blank, endpoints are unprotected. Use a secret before deploying.
+
+#### Force-rerunning a job
+
+Each `/jobs/*` route uses a per-(date, job) run lock backed by `run_logs`. A
+second invocation while a run is already in flight returns HTTP **409** and
+records a `skipped` row. To override, pass `force=true`:
+
+```bash
+curl -X POST "http://localhost:3000/jobs/screener?force=1" \
+  -H "authorization: Bearer $CRON_SECRET"
+
+curl -X POST http://localhost:3000/jobs/screener \
+  -H "authorization: Bearer $CRON_SECRET" \
+  -H "content-type: application/json" \
+  -d '{"runDate":"2026-05-11","force":true}'
+```
+
+A forced run marks the prior `running` row as `failed` with reason
+`superseded_by_force`. CLIs accept `--force`:
+
+```bash
+npm run jobs:screener -- --force
+npm run jobs:screener -- 2026-05-11 --force
+```
 
 ## Railway deployment
 
@@ -158,11 +184,17 @@ One-service deployment:
 - Set `ENABLE_WEB=true`
 - Set all env vars from `.env.example`
 
-Cron schedule in `src/server.ts`:
+Cron schedule in `src/server.ts` (DST-aware via `node-cron`'s `timezone` arg):
 
-- Screener: 4:15 PM ET, weekdays (post-close; required for settled daily bars)
-- Outcome tracker: 5:00 PM ET, weekdays
-- Daily summary: 5:30 PM ET, weekdays
+- Screener: 16:15 in `TZ` (default `America/New_York`), weekdays (post-close; required for settled daily bars)
+- Outcome tracker: 17:00 in `TZ`, weekdays
+- Daily summary: 17:30 in `TZ`, weekdays
+
+Vercel cron schedules in `vercel.json` are fixed-UTC instead, since Vercel
+Cron does not honor a TZ field. Default times are `21:15 UTC`, `22:00 UTC`,
+and `22:30 UTC` weekdays — i.e. `5:15/6:00/6:30 PM EDT` during DST and
+`4:15/5:00/5:30 PM EST` outside DST. Both are post-close; the EDT offset is
+the asymmetric case to be aware of.
 
 ## Cursor handoff prompt
 
@@ -188,7 +220,31 @@ You are completing a Phase 1A automated paper-trading tracker. Start by reading 
 
 If the screener fires before Polygon's grouped daily bar for `runDate` has
 settled, it will throw `MarketDataNotSettledError` and the job will record a
-skipped run rather than silently use stale data.
+`partial` run rather than silently use stale data.
+
+### Runtime safety (PR 2)
+
+Every external HTTP call has an `AbortSignal`-driven per-request timeout
+(`FETCH_TIMEOUT_MS`, default 15s for Polygon/Alpaca; `ANTHROPIC_TIMEOUT_MS`,
+default 30s for Anthropic). The screener fans the 32-day grouped-bar lookback
+across `GROUPED_BARS_CONCURRENCY` (default 4). Anthropic calls are wrapped in
+a process-wide `pLimit(ANTHROPIC_CONCURRENCY)` (default 2).
+
+Run locking lives in `run_logs` via a partial unique index on
+`(run_date, job_name) WHERE status='running'`. The lifecycle is:
+
+| Status | Meaning |
+| --- | --- |
+| `running` | A job is in flight for `(run_date, job_name)`. |
+| `success` | Completed without errors. |
+| `partial` | Completed but returned `notSettled` or non-empty `errors`. |
+| `failed` | Threw, or was superseded by `force=true`, or was reaped as stale. |
+| `skipped` | Refused to start because another run was in flight (no `force`). |
+
+Crash-recovery: a `running` row older than `RUN_LOCK_TTL_MS` (default 10 min)
+is reaped before lock acquisition. Boot-time failures (e.g. missing
+`SUPABASE_SERVICE_ROLE_KEY` on Vercel) cannot write to `run_logs`, so they
+emit a structured stderr line that Vercel runtime logs capture instead.
 
 ### Screener defaults
 

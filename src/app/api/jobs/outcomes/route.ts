@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { isAuthorizedCron } from '@/app/api/_auth';
+import { jobErrorResponse, readJobInvocation } from '@/app/api/_jobRequest';
 import { runOutcomeTrackerJob } from '@/jobs/outcomes';
 
 export const runtime = 'nodejs';
@@ -10,15 +11,12 @@ async function handle(req: NextRequest) {
   if (!isAuthorizedCron(req)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
+  const invocation = await readJobInvocation(req);
   try {
-    const body = req.method === 'POST' ? await req.json().catch(() => ({})) : {};
-    const result = await runOutcomeTrackerJob(body?.runDate);
+    const result = await runOutcomeTrackerJob(invocation);
     return NextResponse.json(result);
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    return jobErrorResponse('outcome_tracker', invocation.runDate, err);
   }
 }
 

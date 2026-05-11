@@ -1,4 +1,5 @@
 import { env, requireEnv } from '@/lib/env';
+import { timedFetch } from '@/lib/utils/timed-fetch';
 import type { CorporateActionResult, DailyBar, NewsItem, TickerDetails } from '@/types/app';
 import type { MarketDataClient } from './client';
 
@@ -51,7 +52,10 @@ export class PolygonClient implements MarketDataClient {
     let lastError: Error | null = null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        const res = await fetch(url, { headers: { accept: 'application/json' } });
+        const res = await timedFetch(url, {
+          headers: { accept: 'application/json' },
+          timeoutMs: env.fetchTimeoutMs
+        });
         const json = (await res.json().catch(() => ({}))) as PolygonResponse<T>;
         if (!res.ok) {
           throw new Error(`Polygon request failed ${res.status}: ${json.error ?? json.message ?? res.statusText}`);
