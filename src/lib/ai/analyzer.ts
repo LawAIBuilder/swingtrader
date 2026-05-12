@@ -3,6 +3,7 @@ import pLimit from 'p-limit';
 import { env } from '@/lib/env';
 import type { CatalystEvidence } from '@/lib/catalysts/evidence';
 import { buildAnalysisPrompt } from './prompt';
+import { estimateCostUsd } from './pricing';
 import { AnalysisSchema, type AnalysisOutput } from './schema';
 
 // Single shared cap for concurrent Anthropic calls. The screener loop is
@@ -32,6 +33,9 @@ export interface AnalysisResult {
   schemaValid: boolean;
   retryCount: number;
   tokensUsed: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  estimatedCostUsd: number | null;
   modelName: string;
 }
 
@@ -104,6 +108,9 @@ export async function analyzeWithClaude(evidence: CatalystEvidence): Promise<Ana
       schemaValid: true,
       retryCount: 0,
       tokensUsed: null,
+      inputTokens: null,
+      outputTokens: null,
+      estimatedCostUsd: null,
       modelName: 'mock-ai'
     };
   }
@@ -113,7 +120,8 @@ export async function analyzeWithClaude(evidence: CatalystEvidence): Promise<Ana
   const prompt = buildAnalysisPrompt(evidence);
   let lastRaw = '';
   let lastReason = 'unknown';
-  let tokensUsed: number | null = null;
+  let inputTokensTotal = 0;
+  let outputTokensTotal = 0;
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const message = await limit(() => client.messages.create({
@@ -129,7 +137,8 @@ export async function analyzeWithClaude(evidence: CatalystEvidence): Promise<Ana
       ]
     }));
 
-    tokensUsed = (message.usage?.input_tokens ?? 0) + (message.usage?.output_tokens ?? 0);
+    inputTokensTotal += message.usage?.input_tokens ?? 0;
+    outputTokensTotal += message.usage?.output_tokens ?? 0;
     lastRaw = message.content
       .map((block) => (block.type === 'text' ? block.text : ''))
       .join('\n')
@@ -139,12 +148,16 @@ export async function analyzeWithClaude(evidence: CatalystEvidence): Promise<Ana
       const jsonText = extractJson(lastRaw);
       const parsed = JSON.parse(jsonText) as unknown;
       const output = AnalysisSchema.parse(parsed);
+      const tokensUsed = inputTokensTotal + outputTokensTotal;
       return {
         output,
         rawResponse: lastRaw,
         schemaValid: true,
         retryCount: attempt,
         tokensUsed,
+        inputTokens: inputTokensTotal,
+        outputTokens: outputTokensTotal,
+        estimatedCostUsd: estimateCostUsd(modelName, inputTokensTotal, outputTokensTotal),
         modelName
       };
     } catch (err) {
@@ -153,12 +166,16 @@ export async function analyzeWithClaude(evidence: CatalystEvidence): Promise<Ana
   }
 
   const output = fallbackAnalysis(lastReason);
+  const tokensUsed = inputTokensTotal + outputTokensTotal;
   return {
     output,
     rawResponse: lastRaw || JSON.stringify(output),
     schemaValid: false,
     retryCount: 1,
     tokensUsed,
+    inputTokens: inputTokensTotal,
+    outputTokens: outputTokensTotal,
+    estimatedCostUsd: estimateCostUsd(modelName, inputTokensTotal, outputTokensTotal),
     modelName
   };
 }
@@ -181,6 +198,9 @@ export function syntheticAnalysisForDisposition(disposition: 'AVOID' | 'BLACKOUT
     schemaValid: true,
     retryCount: 0,
     tokensUsed: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    estimatedCostUsd: 0,
     modelName: 'preflag-rules'
   };
 }

@@ -214,10 +214,12 @@ async function markRowComplete(rowId: number, status: Exclude<RunStatus, 'runnin
 function deriveTerminalStatus<T>(result: T): 'success' | 'partial' {
   if (!result || typeof result !== 'object') return 'success';
   const obj = result as Record<string, unknown>;
-  // Screener returns notSettled when market data isn't ready. Outcome tracker
-  // and summary may grow similar markers. Either condition demotes a
-  // technically-completed run to 'partial' so dashboards show the gap.
+  // Screener returns notSettled when market data isn't ready. Broker recon
+  // returns inconclusive when the broker outage made it impossible to draw
+  // conclusions. Either marker demotes a "completed" run to 'partial' so the
+  // dashboard surfaces the gap and operators see something is off.
   if (obj.notSettled != null) return 'partial';
+  if (obj.inconclusive === true) return 'partial';
   const errs = obj.errors;
   if (Array.isArray(errs) && errs.length > 0) return 'partial';
   return 'success';

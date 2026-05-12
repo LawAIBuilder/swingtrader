@@ -301,6 +301,47 @@ screener route caps at 300s on Vercel Pro and 10s on Hobby. The outcome
 tracker route caps at 300s; the summary route at 60s. The 10-min TTL leaves
 ample headroom over all three on either tier.
 
+### Provider smoke command
+
+Before flipping production from mock data to real Polygon/Massive, verify the
+configured plan actually returns same-day grouped daily bars after market
+close. The free tier returns `NOT_AUTHORIZED` for current-day data and is
+incompatible with the screener:
+
+```bash
+# probe today (NY) and the last 5 business days
+npm run smoke:provider
+
+# probe a specific date
+npm run smoke:provider -- 2026-05-08
+```
+
+The command prints provider name, base URL, freshness mode, per-date probe
+results (ok / empty / error), and the precise vendor message on errors. Exit
+code 2 means no probed date returned bars.
+
+### Production platform upgrade checklist
+
+Operational steps that cannot be done from this repo. Verify each one before
+expecting `run_logs` to show `status='success'` for real data:
+
+1. **Rotate exposed secrets.** Any `SUPABASE_SERVICE_ROLE_KEY`,
+   `POLYGON_API_KEY`, `ANTHROPIC_API_KEY`, `FINNHUB_API_KEY`, or
+   `CRON_SECRET` value that ever appeared in a chat transcript or screenshot
+   must be regenerated and re-set on Vercel.
+2. **Polygon/Massive paid tier.** The free tier refuses current-day grouped
+   bars and is rate-limited too aggressively for the 32-day fan-out. Subscribe
+   to a plan that includes same-day grouped daily bars (Stocks Starter or
+   above) and run `npm run smoke:provider` against production env to confirm.
+3. **Vercel runtime tier.** The Hobby plan caps serverless functions at 10s.
+   Real Polygon fetches plus AI analysis routinely exceed that. Either
+   upgrade the project to **Vercel Pro** (300s `maxDuration`, already coded
+   in each `/api/jobs/*` route) or run the screener/outcomes/summary jobs
+   from a long-running worker (Railway with `npm run start:railway`,
+   `ENABLE_CRON=true`).
+4. **Set `MARKET_DATA_FRESHNESS_MODE=same_day_required`** in production env
+   so the screener never silently uses stale bars on a misconfigured tier.
+
 ### Staged production rollout (one env at a time)
 
 The recommended sequence to avoid surprises when going live, given that
@@ -422,7 +463,114 @@ The broad screener defaults to Polygon/Massive grouped daily bars because it is 
 
 ### Security
 
-The dashboard uses the Supabase service role key on the server side. Do not expose this app publicly without authentication. For personal Railway/Vercel use behind a private URL, it is acceptable for Phase 1A, but add Supabase Auth before sharing.
+The dashboard now ships with a Supabase Auth magic-link flow plus an
+`ADMIN_EMAILS` allowlist enforced in `src/middleware.ts`. The behavior is:
+
+- **Public**: `/api/health`, `/login`, `/auth/callback`, `/auth/signout`, the
+  three `/api/jobs/*` endpoints (those are protected by `CRON_SECRET` and a
+  per-IP rate limit instead).
+- **Authenticated allowlist**: every other route. Hitting `/`, `/trades`,
+  `/runs`, `/settings`, or `/trades/[id]` without a valid Supabase session for
+  an email in `ADMIN_EMAILS` redirects to `/login` with an explicit reason.
+- **Anon Supabase reads**: still work for the dashboard views (candidates,
+  open/closed trades, run logs). The new `daily_summaries` table is
+  authenticated-only at the RLS layer so historical summary bodies never leak
+  to anon.
+
+Required env to enable auth:
+
+```bash
+ADMIN_EMAILS="you@example.com,partner@example.com"
+DASHBOARD_AUTH_REQUIRED=true
+NEXT_PUBLIC_SUPABASE_URL=...
+NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+```
+
+If `ADMIN_EMAILS` is empty, every authenticated request is rejected with
+`error=forbidden`. This is intentional: a Supabase project shared with other
+apps could otherwise let any signed-in user reach the dashboard.
+
+For local dev set `DASHBOARD_AUTH_REQUIRED=false` to skip the redirect.
+
+The dashboard uses the Supabase service role key only on the server side
+(jobs, summary persistence). It is never sent to the browser.
+
+### Intraday paper mode (PR 7)
+
+Set `TRADING_MODE=eod_swing,intraday_paper` to enable. The intraday tick job
+lives at `POST /api/jobs/intraday` (CLI: `npm run jobs:intraday`). It does
+two things on every call:
+
+1. **Progress** open `intraday_paper_trades` rows: pull a fresh quote, write
+   to `intraday_progression`, close on stop / target / time-stop, refuse to
+   close at unfavorable fill when the spread is too wide.
+2. **Open** new intraday paper trades for today's `BUY` tier swing
+   candidates that don't already have an open intraday position. Entry
+   decisions go through `decideIntradayEntry` (`src/lib/intraday/entry.ts`)
+   which rejects when the spread is wider than `INTRADAY_MAX_SPREAD_BPS` or
+   when round-trip slippage would dominate the stop distance.
+
+There is intentionally no Vercel cron entry for `/api/jobs/intraday` in
+`vercel.json`. Intraday should be opt-in (rate limits, cost, intent) — wire
+it from an external scheduler (Vercel cron in your own project, Railway
+cron, GitHub Actions on a schedule, etc.) when you're ready.
+
+The default `INTRADAY_PROVIDER=mock` uses a deterministic in-memory quote
+generator. A real Alpaca SIP / Databento adapter is intentionally not wired
+up yet; the `IntradayClient` interface in `src/lib/intraday/client.ts` is
+the contract any future adapter must satisfy.
+
+### Broker paper execution (PR 8)
+
+Set `BROKER_MODE=paper` to enable the broker pipeline. Default is
+`disabled`, in which case every broker call throws `BrokerDisabledError`.
+
+What ships:
+
+- `BrokerClient` interface (`src/lib/broker/client.ts`) with three
+  implementations: `DisabledBrokerClient` (default), `MockBrokerClient`
+  (deterministic, used in tests), `AlpacaPaperBrokerClient`. The Alpaca
+  adapter refuses to construct against any base URL that doesn't contain
+  `paper`, so even a misconfigured `ALPACA_PAPER_BASE_URL` cannot point at
+  the live endpoint.
+- Idempotent `submitOrderIdempotent` (`src/lib/broker/submit.ts`) that
+  records every order in `broker_orders` BEFORE submission, with a stable
+  `idempotency_key` derived via `src/lib/broker/idempotency.ts`. Alpaca
+  rejects duplicate submissions with the same `client_order_id`, so
+  retries after a network drop cannot double-fill.
+- Reconciliation job (`POST /api/jobs/broker-recon`, CLI:
+  `npm run jobs:broker-recon`) that pulls broker orders since a window,
+  classifies them as `matched` / `mismatch` / `broker_unknown` /
+  `orphan_local`, heals `submission_failed` rows whose orders actually
+  reached the broker, and snapshots positions to `broker_positions`.
+- Emergency cancel-all: `POST /api/broker/cancel-all` with the cron secret
+  bearer header. Refused with HTTP 409 when `BROKER_MODE=disabled`.
+
+There is no live broker mode anywhere in this codebase. A future `live`
+branch would require a separate adapter that does not exist here, plus a
+manual passthrough of the execution gate.
+
+### Live execution gate (PR 9)
+
+`/execution` reports whether the system would be allowed to flip on live
+orders if the code existed:
+
+- Closed BUY trade sample size >= `EXECUTION_GATE_MIN_SAMPLES`
+- BUY avg net P/L >= `EXECUTION_GATE_MIN_NET_PNL` AND > rules_only baseline
+- Max equity-curve drawdown <= `EXECUTION_GATE_MAX_DRAWDOWN`
+- N consecutive clean broker-recon days >= `EXECUTION_GATE_MIN_RECON_DAYS`
+- Operator has explicitly set `EXECUTION_GATE_MANUALLY_ENABLED=true`
+
+The page also shows the active **hard halts**:
+
+- `daily_loss_breached` when today's net P/L < -`HALT_MAX_DAILY_LOSS_PCT`
+- `concurrent_positions` when open paper trades > `HALT_MAX_CONCURRENT_POSITIONS`
+- `stale_market_data` when last screener run > `HALT_STALE_DATA_MAX_MINUTES`
+- `reconciliation_failure` when any broker order is mismatched/orphan
+- `api_auth_failure` when latest screener saw `POLYGON_NOT_AUTHORIZED`
+
+The `liveExecutionAvailable` field on the gate status is hardcoded to
+`false`. There is no code path that would flip it to true.
 
 ## What Cursor should finish next
 

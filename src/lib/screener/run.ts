@@ -1,11 +1,39 @@
 import pLimit from 'p-limit';
 import { env } from '@/lib/env';
 import type { MarketDataClient } from '@/lib/market/client';
-import { getMarketDataClient } from '@/lib/market/provider';
+import { getMarketDataClient, getMarketDataProviderInfo, type MarketProviderInfo } from '@/lib/market/provider';
 import { businessDatesBack, todayInNewYork } from '@/lib/utils/dates';
 import type { DailyBar, ScreenedCandidate, ScreenSource, TickerMetrics } from '@/types/app';
 import { passesUniverseFilter } from './filters';
 import { computeMetricsForTicker, evaluateScreens } from './screens';
+
+// Per-day fetch outcome for the lookback window. The screener summarizes these
+// so dashboards and run logs can show "we asked for 32 days, got 22, latest is
+// 2026-05-09, refused current-day with NOT_AUTHORIZED" without rerunning.
+export type ScreenerFetchOutcome = 'ok' | 'empty' | 'error';
+
+export interface ScreenerFetchAttempt {
+  date: string;
+  outcome: ScreenerFetchOutcome;
+  bars: number;
+  errorMessage?: string;
+}
+
+export interface ScreenerDataDiagnostics {
+  provider: MarketProviderInfo;
+  freshnessMode: 'same_day_required' | 'latest_available';
+  requestedRunDate: string;
+  // Latest date the provider returned bars for in this fetch window.
+  latestAvailableDate: string | null;
+  windowSize: number;
+  windowOk: number;
+  windowEmpty: number;
+  windowError: number;
+  // First five error messages, deduplicated. Useful to surface auth / quota
+  // problems on the dashboard without dumping the whole log.
+  errorSamples: string[];
+  attempts: ScreenerFetchAttempt[];
+}
 
 export interface ScreenerResult {
   runDate: string;
@@ -14,6 +42,7 @@ export interface ScreenerResult {
   roughCandidates: number;
   detailsFetched: number;
   skippedForDetails: number;
+  diagnostics: ScreenerDataDiagnostics;
 }
 
 // Thrown when the latest market bar available is older than runDate.
@@ -23,10 +52,12 @@ export class MarketDataNotSettledError extends Error {
   readonly name = 'MarketDataNotSettledError';
   readonly runDate: string;
   readonly dataDate: string;
-  constructor(runDate: string, dataDate: string) {
+  readonly diagnostics: ScreenerDataDiagnostics;
+  constructor(runDate: string, dataDate: string, diagnostics: ScreenerDataDiagnostics) {
     super(`Market data not settled for runDate=${runDate}; latest available dataDate=${dataDate}`);
     this.runDate = runDate;
     this.dataDate = dataDate;
+    this.diagnostics = diagnostics;
   }
 }
 
@@ -40,6 +71,32 @@ export interface RunScreenerOptions {
   client?: MarketDataClient;
 }
 
+function buildDiagnostics(args: {
+  runDate: string;
+  attempts: ScreenerFetchAttempt[];
+  latestDate: string | null;
+}): ScreenerDataDiagnostics {
+  const errorMessages: string[] = [];
+  for (const attempt of args.attempts) {
+    if (attempt.outcome !== 'error' || !attempt.errorMessage) continue;
+    if (errorMessages.includes(attempt.errorMessage)) continue;
+    errorMessages.push(attempt.errorMessage);
+    if (errorMessages.length >= 5) break;
+  }
+  return {
+    provider: getMarketDataProviderInfo(),
+    freshnessMode: env.marketDataFreshnessMode,
+    requestedRunDate: args.runDate,
+    latestAvailableDate: args.latestDate,
+    windowSize: args.attempts.length,
+    windowOk: args.attempts.filter((a) => a.outcome === 'ok').length,
+    windowEmpty: args.attempts.filter((a) => a.outcome === 'empty').length,
+    windowError: args.attempts.filter((a) => a.outcome === 'error').length,
+    errorSamples: errorMessages,
+    attempts: args.attempts
+  };
+}
+
 function groupByTicker(groupedBarsByDate: DailyBar[][]): Map<string, DailyBar[]> {
   const byTicker = new Map<string, DailyBar[]>();
   for (const dayBars of groupedBarsByDate) {
@@ -51,9 +108,9 @@ function groupByTicker(groupedBarsByDate: DailyBar[][]): Map<string, DailyBar[]>
   return byTicker;
 }
 
-function chooseLatestDataDate(grouped: Array<{ date: string; bars: DailyBar[] }>): string {
+function chooseLatestDataDate(grouped: Array<{ date: string; bars: DailyBar[] }>): string | null {
   const withBars = grouped.filter((g) => g.bars.length > 0);
-  if (withBars.length === 0) throw new Error('No market bars returned for lookback window');
+  if (withBars.length === 0) return null;
   return withBars[withBars.length - 1].date;
 }
 
@@ -66,24 +123,48 @@ export async function runScreener(runDate = todayInNewYork(), options: RunScreen
   // matters downstream (chooseLatestDataDate inspects the trailing element), so
   // results are reassembled in date order regardless of completion order.
   const groupedLimit = pLimit(env.groupedBarsConcurrency);
-  const grouped: Array<{ date: string; bars: DailyBar[] }> = await Promise.all(
+  const grouped: Array<{ date: string; bars: DailyBar[]; outcome: ScreenerFetchOutcome; errorMessage?: string }> = await Promise.all(
     dates.map((date) =>
       groupedLimit(async () => {
         try {
           const bars = await client.getGroupedDailyBars(date);
-          return { date, bars };
-        } catch {
-          // Holidays and provider gaps are expected. Keep going.
-          return { date, bars: [] };
+          return {
+            date,
+            bars,
+            outcome: (bars.length > 0 ? 'ok' : 'empty') as ScreenerFetchOutcome
+          };
+        } catch (err) {
+          // Holidays and provider gaps look the same to us; we tag them as 'error'
+          // so diagnostics can show the actual vendor message (e.g.
+          // "NOT_AUTHORIZED" on Polygon's free tier for current-day data).
+          return {
+            date,
+            bars: [] as DailyBar[],
+            outcome: 'error' as ScreenerFetchOutcome,
+            errorMessage: err instanceof Error ? err.message : String(err)
+          };
         }
       })
     )
   );
 
-  const dataDate = chooseLatestDataDate(grouped);
-  if (requireSettled && dataDate !== runDate) {
-    throw new MarketDataNotSettledError(runDate, dataDate);
+  const attempts: ScreenerFetchAttempt[] = grouped.map((g) => ({
+    date: g.date,
+    outcome: g.outcome,
+    bars: g.bars.length,
+    errorMessage: g.errorMessage
+  }));
+  const latestDate = chooseLatestDataDate(grouped);
+  const diagnostics = buildDiagnostics({ runDate, attempts, latestDate });
+
+  if (latestDate == null) {
+    throw new MarketDataNotSettledError(runDate, '', diagnostics);
   }
+
+  if (requireSettled && latestDate !== runDate) {
+    throw new MarketDataNotSettledError(runDate, latestDate, diagnostics);
+  }
+  const dataDate = latestDate;
   const usableGrouped = grouped.filter((g) => g.date <= dataDate && g.bars.length > 0).map((g) => g.bars);
   const byTicker = groupByTicker(usableGrouped);
 
@@ -150,6 +231,7 @@ export async function runScreener(runDate = todayInNewYork(), options: RunScreen
     candidates,
     roughCandidates: rough.length,
     detailsFetched: limitedRough.length,
-    skippedForDetails
+    skippedForDetails,
+    diagnostics
   };
 }

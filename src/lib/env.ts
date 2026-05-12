@@ -17,6 +17,32 @@ function parseEntryMode(value: string | undefined): EntryMode {
   return 'next_day_open';
 }
 
+export type MarketDataFreshnessMode = 'same_day_required' | 'latest_available';
+
+function parseFreshnessMode(value: string | undefined): MarketDataFreshnessMode {
+  if (value === 'latest_available') return 'latest_available';
+  return 'same_day_required';
+}
+
+export type TradingMode = 'eod_swing' | 'intraday_paper';
+
+export type BrokerMode = 'disabled' | 'paper';
+
+function parseBrokerMode(value: string | undefined): BrokerMode {
+  if (value === 'paper') return 'paper';
+  return 'disabled';
+}
+
+function parseTradingMode(value: string | undefined): TradingMode[] {
+  if (!value) return ['eod_swing'];
+  const parts = value.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const allowed: TradingMode[] = [];
+  for (const p of parts) {
+    if (p === 'eod_swing' || p === 'intraday_paper') allowed.push(p);
+  }
+  return allowed.length > 0 ? allowed : ['eod_swing'];
+}
+
 const EnvSchema = z.object({
   NODE_ENV: z.string().default('development'),
   PORT: z.string().optional(),
@@ -41,6 +67,7 @@ const EnvSchema = z.object({
   POLYGON_API_KEY: z.string().optional(),
   POLYGON_BASE_URL: z.string().optional(),
   MARKET_DATA_PROVIDER: z.string().optional(),
+  MARKET_DATA_FRESHNESS_MODE: z.string().optional(),
   MOCK_MARKET_DATA: z.string().optional(),
   MAX_CANDIDATES_PER_SCREEN: z.string().optional(),
   DETAILS_CONCURRENCY: z.string().optional(),
@@ -79,7 +106,29 @@ const EnvSchema = z.object({
   EDGAR_TICKERS_URL: z.string().optional(),
   CORP_ACTION_LOOKBACK_DAYS: z.string().optional(),
   CORP_ACTION_LOOKAHEAD_DAYS: z.string().optional(),
-  OFFERING_LOOKBACK_DAYS: z.string().optional()
+  OFFERING_LOOKBACK_DAYS: z.string().optional(),
+
+  ADMIN_EMAILS: z.string().optional(),
+  DASHBOARD_AUTH_REQUIRED: z.string().optional(),
+  JOB_RATE_LIMIT_PER_MINUTE: z.string().optional(),
+
+  TRADING_MODE: z.string().optional(),
+  INTRADAY_PROVIDER: z.string().optional(),
+  INTRADAY_MAX_SPREAD_BPS: z.string().optional(),
+  INTRADAY_RISK_PER_TRADE_PCT: z.string().optional(),
+  INTRADAY_TIME_STOP_MINUTES: z.string().optional(),
+  INTRADAY_MAX_QUOTE_AGE_SECONDS: z.string().optional(),
+
+  BROKER_MODE: z.string().optional(),
+  ALPACA_PAPER_BASE_URL: z.string().optional(),
+  EXECUTION_GATE_MIN_SAMPLES: z.string().optional(),
+  EXECUTION_GATE_MIN_NET_PNL: z.string().optional(),
+  EXECUTION_GATE_MAX_DRAWDOWN: z.string().optional(),
+  EXECUTION_GATE_MIN_RECON_DAYS: z.string().optional(),
+  EXECUTION_GATE_MANUALLY_ENABLED: z.string().optional(),
+  HALT_MAX_DAILY_LOSS_PCT: z.string().optional(),
+  HALT_MAX_CONCURRENT_POSITIONS: z.string().optional(),
+  HALT_STALE_DATA_MAX_MINUTES: z.string().optional()
 }).passthrough();
 
 const raw = EnvSchema.parse(process.env);
@@ -111,6 +160,12 @@ export const env = {
   polygonApiKey: raw.POLYGON_API_KEY,
   polygonBaseUrl: raw.POLYGON_BASE_URL ?? 'https://api.polygon.io',
   marketDataProvider: raw.MARKET_DATA_PROVIDER ?? 'polygon',
+  // 'same_day_required' (default): the screener throws MarketDataNotSettledError
+  // when the latest grouped-bar date is older than runDate, so cron runs on the
+  // free Polygon tier (which refuses current-day data) cannot silently use
+  // stale bars to enter trades. 'latest_available' tolerates skewed dates and
+  // is intended for backfill / smoke runs only.
+  marketDataFreshnessMode: parseFreshnessMode(raw.MARKET_DATA_FRESHNESS_MODE),
   mockMarketData: parseBool(raw.MOCK_MARKET_DATA, false),
   maxCandidatesPerScreen: parseNum(raw.MAX_CANDIDATES_PER_SCREEN, 20),
   detailsConcurrency: parseNum(raw.DETAILS_CONCURRENCY, 4),
@@ -172,8 +227,61 @@ export const env = {
   corpActionLookaheadDays: parseNum(raw.CORP_ACTION_LOOKAHEAD_DAYS, 10),
   // How far back to search EDGAR for offering filings. 30d catches recent
   // pricings (424B*) without diluting the signal with old shelf registrations.
-  offeringLookbackDays: parseNum(raw.OFFERING_LOOKBACK_DAYS, 30)
+  offeringLookbackDays: parseNum(raw.OFFERING_LOOKBACK_DAYS, 30),
+
+  // Auth (PR 4D). DASHBOARD_AUTH_REQUIRED defaults to true so a fresh deploy
+  // with ADMIN_EMAILS set is private by default. Set to false locally to skip
+  // the magic-link flow during dev. ADMIN_EMAILS is comma-separated.
+  adminEmails: (raw.ADMIN_EMAILS ?? '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e.length > 0),
+  dashboardAuthRequired: parseBool(raw.DASHBOARD_AUTH_REQUIRED, true),
+  // In-memory token bucket per IP. Best-effort only; a real deploy behind
+  // multiple serverless instances should replace this with Upstash/KV.
+  jobRateLimitPerMinute: parseNum(raw.JOB_RATE_LIMIT_PER_MINUTE, 30),
+
+  // Intraday paper mode (PR 7). Disabled by default. When TRADING_MODE
+  // includes 'intraday_paper', the intraday tick job is reachable; live
+  // execution remains unconditionally absent.
+  tradingMode: parseTradingMode(raw.TRADING_MODE),
+  intradayProvider: raw.INTRADAY_PROVIDER ?? 'mock',
+  // Spread above this is treated as un-tradable for paper-quote simulation.
+  // 50 bps on a $100 stock is $0.50 round-trip, which is already tight for
+  // a "couple cents" target.
+  intradayMaxSpreadBps: parseNum(raw.INTRADAY_MAX_SPREAD_BPS, 50),
+  intradayRiskPerTradePct: parseNum(raw.INTRADAY_RISK_PER_TRADE_PCT, 0.5),
+  // Time stop after this many minutes if neither stop nor target hit.
+  intradayTimeStopMinutes: parseNum(raw.INTRADAY_TIME_STOP_MINUTES, 30),
+  // Reject quotes older than this many seconds. Without this, a hung provider
+  // adapter could feed us a stale snapshot from minutes/hours ago and we'd
+  // happily compute fake P&L from it.
+  intradayMaxQuoteAgeSeconds: parseNum(raw.INTRADAY_MAX_QUOTE_AGE_SECONDS, 60),
+
+  // Broker (PR 8). 'disabled' (default) means no broker client is constructed
+  // and no orders can be sent anywhere. 'paper' targets Alpaca's paper API
+  // only. There is intentionally no 'live' branch in this codebase.
+  brokerMode: parseBrokerMode(raw.BROKER_MODE),
+  alpacaPaperBaseUrl: raw.ALPACA_PAPER_BASE_URL ?? 'https://paper-api.alpaca.markets',
+
+  // Live execution gate (PR 9). The gate is purely a status check. Even if
+  // every gate value is met, no live orders can be placed because no live
+  // broker client exists.
+  executionGate: {
+    minSamples: parseNum(raw.EXECUTION_GATE_MIN_SAMPLES, 100),
+    minNetPnl: parseNum(raw.EXECUTION_GATE_MIN_NET_PNL, 0.005),
+    maxDrawdown: parseNum(raw.EXECUTION_GATE_MAX_DRAWDOWN, 0.05),
+    minReconDays: parseNum(raw.EXECUTION_GATE_MIN_RECON_DAYS, 30),
+    manuallyEnabled: parseBool(raw.EXECUTION_GATE_MANUALLY_ENABLED, false)
+  },
+
+  haltLimits: {
+    maxDailyLossPct: parseNum(raw.HALT_MAX_DAILY_LOSS_PCT, 0.02),
+    maxConcurrentPositions: parseNum(raw.HALT_MAX_CONCURRENT_POSITIONS, 10),
+    staleDataMaxMinutes: parseNum(raw.HALT_STALE_DATA_MAX_MINUTES, 90)
+  }
 };
+
 
 export function requireEnv(name: string, value: string | undefined): string {
   if (!value) {

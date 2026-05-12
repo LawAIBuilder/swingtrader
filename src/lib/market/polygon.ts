@@ -55,6 +55,7 @@ export class PolygonClient implements MarketDataClient {
     url.searchParams.set('apiKey', this.apiKey);
 
     let lastError: Error | null = null;
+    let lastStatus: number | null = null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         const res = await timedFetch(url, {
@@ -63,11 +64,28 @@ export class PolygonClient implements MarketDataClient {
         });
         const json = (await res.json().catch(() => ({}))) as PolygonResponse<T>;
         if (!res.ok) {
-          throw new Error(`Polygon request failed ${res.status}: ${json.error ?? json.message ?? res.statusText}`);
+          lastStatus = res.status;
+          // Normalize the most common free-tier failure (current-day grouped
+          // bars on a plan that does not include them). Polygon returns
+          // status:"NOT_AUTHORIZED" with HTTP 403. We tag it explicitly so
+          // diagnostics can surface "upgrade plan" rather than a generic
+          // 403 message.
+          const upstreamStatus = json.status ?? '';
+          const message = json.error ?? json.message ?? res.statusText;
+          if (res.status === 403 || upstreamStatus === 'NOT_AUTHORIZED') {
+            throw new Error(`POLYGON_NOT_AUTHORIZED ${res.status} ${path}: ${message}`);
+          }
+          if (res.status === 429) {
+            throw new Error(`POLYGON_RATE_LIMITED ${res.status} ${path}: ${message}`);
+          }
+          throw new Error(`Polygon request failed ${res.status} ${path}: ${message}`);
         }
         return json;
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
+        // Don't retry auth/quota failures - they will keep returning the same
+        // answer and we want to surface them quickly in diagnostics.
+        if (lastStatus === 403 || lastStatus === 401) break;
         await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
       }
     }

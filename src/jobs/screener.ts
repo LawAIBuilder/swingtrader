@@ -1,11 +1,12 @@
 import { env } from '@/lib/env';
 import { analyzeWithClaude, syntheticAnalysisForDisposition } from '@/lib/ai/analyzer';
+import { seedBaselinesForCandidate } from '@/lib/baselines';
 import { buildCatalystEvidence } from '@/lib/catalysts/evidence';
 import { checkRecentOfferingFiling } from '@/lib/edgar/client';
 import { getMarketDataClient } from '@/lib/market/provider';
 import { evaluatePreFlags } from '@/lib/preflags';
 import { computeSlippage, computeStopAndTarget } from '@/lib/risk';
-import { MarketDataNotSettledError, runScreener } from '@/lib/screener/run';
+import { MarketDataNotSettledError, runScreener, type ScreenerDataDiagnostics } from '@/lib/screener/run';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { addDays, nextBusinessDay } from '@/lib/utils/dates';
 import { round } from '@/lib/utils/numbers';
@@ -20,9 +21,14 @@ export interface ScreenerJobResult {
   candidatesFound: number;
   insertedOrUpdated: number;
   paperTradesCreated: number;
+  baselinesSeeded: number;
   skipped: number;
   aiCalls: number;
   notSettled?: { dataDate: string };
+  // Always populated. The dashboard reads this to show provider name, base URL,
+  // freshness mode, and the first few vendor errors. On not-settled runs this
+  // is the only useful diagnostic the operator gets.
+  diagnostics: ScreenerDataDiagnostics;
   errors: Array<{ ticker: string; message: string }>;
 }
 
@@ -126,7 +132,10 @@ async function insertAnalysis(candidateId: number, result: Awaited<ReturnType<ty
       raw_response: result.rawResponse,
       schema_valid: result.schemaValid,
       retry_count: result.retryCount,
-      tokens_used: result.tokensUsed
+      tokens_used: result.tokensUsed,
+      input_tokens: result.inputTokens,
+      output_tokens: result.outputTokens,
+      estimated_cost_usd: result.estimatedCostUsd
     })
     .select('id')
     .single();
@@ -205,7 +214,11 @@ export async function runScreenerJob(options: RunScreenerJobOptions = {}): Promi
     const marketClient = getMarketDataClient();
     let result;
     try {
-      result = await runScreener(runDate);
+      // The freshness env controls whether the screener tolerates stale dates.
+      // Production must keep same_day_required so a misconfigured Polygon plan
+      // cannot silently produce trades from yesterday's bars.
+      const requireSettled = env.marketDataFreshnessMode === 'same_day_required';
+      result = await runScreener(runDate, { requireSettled });
     } catch (err) {
       // Fail loudly but cleanly: cron fired before market data settled, or on a
       // holiday. Report a skipped run rather than entering trades on stale bars.
@@ -216,9 +229,11 @@ export async function runScreenerJob(options: RunScreenerJobOptions = {}): Promi
           candidatesFound: 0,
           insertedOrUpdated: 0,
           paperTradesCreated: 0,
+          baselinesSeeded: 0,
           skipped: 0,
           aiCalls: 0,
           notSettled: { dataDate: err.dataDate },
+          diagnostics: err.diagnostics,
           errors: []
         };
       }
@@ -227,6 +242,7 @@ export async function runScreenerJob(options: RunScreenerJobOptions = {}): Promi
     const errors: ScreenerJobResult['errors'] = [];
     let insertedOrUpdated = 0;
     let paperTradesCreated = 0;
+    let baselinesSeeded = 0;
     let skipped = 0;
     let aiCalls = 0;
 
@@ -256,6 +272,16 @@ export async function runScreenerJob(options: RunScreenerJobOptions = {}): Promi
         });
         await upsertPreFlags(candidateRow.id, flags);
 
+        // Seed baseline trades for buy_all and rules_only before the AI gate.
+        // The AI tier never affects baselines; that's the whole point of the
+        // counterfactual.
+        try {
+          const seeded = await seedBaselinesForCandidate({ candidate, candidateRow, preFlags: flags });
+          baselinesSeeded += seeded.filter((s) => s.inserted).length;
+        } catch (err) {
+          errors.push({ ticker: candidate.ticker, message: `baseline_seed: ${err instanceof Error ? err.message : String(err)}` });
+        }
+
         if (flags.auto_disposition === 'SKIP') {
           skipped += 1;
           continue;
@@ -281,8 +307,10 @@ export async function runScreenerJob(options: RunScreenerJobOptions = {}): Promi
       candidatesFound: result.candidates.length,
       insertedOrUpdated,
       paperTradesCreated,
+      baselinesSeeded,
       skipped,
       aiCalls,
+      diagnostics: result.diagnostics,
       errors
     };
   });
