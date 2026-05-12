@@ -196,6 +196,126 @@ and `22:30 UTC` weekdays — i.e. `5:15/6:00/6:30 PM EDT` during DST and
 `4:15/5:00/5:30 PM EST` outside DST. Both are post-close; the EDT offset is
 the asymmetric case to be aware of.
 
+## Operational runbook (production)
+
+These examples assume the deployed dashboard at
+`https://swingtrader-two.vercel.app` and a `CRON_SECRET` set via Vercel env
+vars. Replace `BASE_URL` and `CRON_SECRET` for your own deployment.
+
+```bash
+export BASE_URL=https://swingtrader-two.vercel.app
+export CRON_SECRET=...   # the value set in Vercel project env vars
+```
+
+### Authenticated normal run (manual trigger)
+
+```bash
+curl -i -X POST "$BASE_URL/api/jobs/screener" \
+  -H "authorization: Bearer $CRON_SECRET" \
+  -H "content-type: application/json" \
+  -d '{"runDate":"2026-05-11"}'
+```
+
+A successful run returns `200` and a JSON `ScreenerJobResult`. A run that
+declined to enter trades (market data not yet settled) returns `200` with
+`"notSettled": { "dataDate": "..." }` and is recorded in `run_logs` as
+`status='partial'`. Vercel Cron uses `GET` and is otherwise identical.
+
+### Forcing a rerun on top of a stuck or completed run
+
+```bash
+curl -i -X POST "$BASE_URL/api/jobs/screener?force=1" \
+  -H "authorization: Bearer $CRON_SECRET"
+
+curl -i -X POST "$BASE_URL/api/jobs/screener" \
+  -H "authorization: Bearer $CRON_SECRET" \
+  -H "content-type: application/json" \
+  -d '{"runDate":"2026-05-11","force":true}'
+```
+
+`force=true` marks any prior `running` row for the same `(run_date, job_name)`
+as `status='failed'` with `details.reason='superseded_by_force'`, then inserts
+a new `running` row and proceeds. The original run's eventual write is a
+no-op (`markRowComplete` only transitions `running → terminal`), so the
+supersede marker survives.
+
+### Expected 409 Locked response
+
+A non-forced second run while another is in flight returns:
+
+```http
+HTTP/1.1 409 Conflict
+content-type: application/json
+
+{
+  "skipped": true,
+  "reason": "concurrent_run_in_progress",
+  "jobName": "screener",
+  "runDate": "2026-05-11"
+}
+```
+
+The same condition writes a `status='skipped'` row to `run_logs` with
+`details.reason='concurrent_run_in_progress'`, so the dashboard's recent-run
+log shows the attempted overlap.
+
+### Where to find boot failures in Vercel logs
+
+`run_logs` writes require `SUPABASE_SERVICE_ROLE_KEY`. If that env var is
+missing or Supabase is unreachable, the job cannot record a `failed` row. In
+that case `withRunLog` emits a structured stderr line that Vercel runtime
+logs capture:
+
+```
+{"event":"run_log_boot_failure","job":"screener","runDate":"2026-05-11","error":"Missing required env var: SUPABASE_SERVICE_ROLE_KEY"}
+```
+
+Equivalent for an unhandled exception that escaped the lock lifecycle:
+
+```
+{"event":"job_route_failure","job":"screener","runDate":"2026-05-11","error":"..."}
+```
+
+In the Vercel dashboard, filter runtime logs by:
+
+- **Project**: swingtrader
+- **Path** contains: `/api/jobs/`
+- **Level**: `error`
+- **Search**: `run_log_boot_failure` or `job_route_failure`
+
+A 500 response with no message body in the log row means the failure happened
+before this PR shipped — it predates the stderr fallback.
+
+### Tunable timeouts and TTL
+
+| Env var | Default | Notes |
+| --- | --- | --- |
+| `FETCH_TIMEOUT_MS` | 15000 | Per-request HTTP timeout for Polygon and Alpaca. |
+| `ANTHROPIC_TIMEOUT_MS` | 30000 | Per-request timeout for Anthropic SDK. |
+| `GROUPED_BARS_CONCURRENCY` | 4 | Parallelism for the 32-day lookback fetch. |
+| `ANTHROPIC_CONCURRENCY` | 2 | Cap on in-flight `messages.create` calls. |
+| `RUN_LOCK_TTL_MS` | 600000 (10 min) | Stale `running` rows older than this are reaped. |
+
+Keep `RUN_LOCK_TTL_MS` comfortably above any function's `maxDuration`. The
+screener route caps at 300s on Vercel Pro and 10s on Hobby. The outcome
+tracker route caps at 300s; the summary route at 60s. The 10-min TTL leaves
+ample headroom over all three on either tier.
+
+### Staged production rollout (one env at a time)
+
+The recommended sequence to avoid surprises when going live, given that
+Vercel env-var changes require a redeploy to take effect:
+
+1. Set only `SUPABASE_SERVICE_ROLE_KEY`, redeploy, keep `MOCK_MARKET_DATA=true`
+   and `USE_MOCK_AI=true`. Manually trigger `/api/jobs/screener` and confirm a
+   `run_logs` row appears via the dashboard.
+2. Add `POLYGON_API_KEY`, redeploy, set `MOCK_MARKET_DATA=false`, keep
+   `USE_MOCK_AI=true`. Manually trigger and confirm real candidates appear.
+3. Add `ANTHROPIC_API_KEY`, redeploy, set `USE_MOCK_AI=false`. Manually
+   trigger and confirm `analyses` rows are populated with real model output.
+4. Optionally add `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_TO` and verify the
+   summary email path on a Friday close.
+
 ## Cursor handoff prompt
 
 Paste this into Cursor after opening the repo:
