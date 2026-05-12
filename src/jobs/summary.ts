@@ -17,6 +17,27 @@ export interface RunDailySummaryJobOptions {
   force?: boolean;
 }
 
+// On Vercel/AWS Lambda the function filesystem is read-only except for /tmp.
+// We still try the local 'reports' dir first so dev/CI runs keep their human-
+// readable artifact, but we fall through to /tmp on the read-only deploy
+// surface, and finally degrade to no fallback at all rather than 500'ing.
+async function writeFallback(runDate: string, markdown: string): Promise<string | null> {
+  const filename = `daily-summary-${runDate}.md`;
+  const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+  const candidates = isServerless ? ['/tmp/reports'] : ['reports', '/tmp/reports'];
+  for (const dir of candidates) {
+    try {
+      await mkdir(dir, { recursive: true });
+      const path = join(dir, filename);
+      await writeFile(path, markdown, 'utf-8');
+      return path;
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
+}
+
 export async function runDailySummaryJob(options: RunDailySummaryJobOptions = {}): Promise<SummaryJobResult> {
   const runDate = options.runDate ?? todayInNewYork();
   const force = options.force ?? false;
@@ -25,9 +46,10 @@ export async function runDailySummaryJob(options: RunDailySummaryJobOptions = {}
     const email = await sendEmail({ subject: `Bounce Trader Daily Summary - ${runDate}`, markdown });
     if (email.sent) return { runDate, emailed: true };
 
-    await mkdir('reports', { recursive: true });
-    const fallbackPath = join('reports', `daily-summary-${runDate}.md`);
-    await writeFile(fallbackPath, markdown, 'utf-8');
-    return { runDate, emailed: false, fallbackPath, reason: email.reason };
+    const fallbackPath = await writeFallback(runDate, markdown);
+    if (fallbackPath) {
+      return { runDate, emailed: false, fallbackPath, reason: email.reason };
+    }
+    return { runDate, emailed: false, reason: email.reason ?? 'fallback_disk_unavailable' };
   });
 }

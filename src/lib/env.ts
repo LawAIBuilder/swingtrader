@@ -28,8 +28,10 @@ const EnvSchema = z.object({
 
   SUPABASE_URL: z.string().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
+  SUPABASE_SECRET_KEY: z.string().optional(),
   NEXT_PUBLIC_SUPABASE_URL: z.string().optional(),
   NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().optional(),
+  NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: z.string().optional(),
 
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().optional(),
@@ -91,10 +93,15 @@ export const env = {
   cronSecret: raw.CRON_SECRET,
   timezone: raw.TZ ?? 'America/New_York',
 
+  // The official Supabase Vercel Marketplace integration writes
+  // SUPABASE_SECRET_KEY / NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY under the new
+  // naming scheme. We accept either name so the same build works with both
+  // manually-managed env vars and integration-managed ones.
   supabaseUrl: raw.SUPABASE_URL ?? raw.NEXT_PUBLIC_SUPABASE_URL,
-  supabaseServiceRoleKey: raw.SUPABASE_SERVICE_ROLE_KEY,
+  supabaseServiceRoleKey: raw.SUPABASE_SERVICE_ROLE_KEY ?? raw.SUPABASE_SECRET_KEY,
   nextPublicSupabaseUrl: raw.NEXT_PUBLIC_SUPABASE_URL,
-  nextPublicSupabaseAnonKey: raw.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+  nextPublicSupabaseAnonKey:
+    raw.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? raw.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
 
   anthropicApiKey: raw.ANTHROPIC_API_KEY,
   anthropicModel: raw.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
