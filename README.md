@@ -342,6 +342,36 @@ If the screener fires before Polygon's grouped daily bar for `runDate` has
 settled, it will throw `MarketDataNotSettledError` and the job will record a
 `partial` run rather than silently use stale data.
 
+### Pre-flag data integrity (PR 3)
+
+`evaluatePreFlags` is the gate every candidate passes through before AI
+analysis. PR 3 hardened it on four fronts:
+
+- **Env-driven liquidity thresholds.** `MIN_PRICE`, `MIN_MARKET_CAP`, and
+  `MIN_AVG_DOLLAR_VOLUME` are read from env, not duplicated in code.
+- **Negation-aware keyword matcher.** `src/lib/text/match.ts` does regex
+  matching with a 36-char negation window in front of every match. "No
+  offering planned" and "has not suspended dividend" no longer trip the
+  affirmative branches. Conservative; not NLP.
+- **Real earnings calendar with explicit fallback.** When
+  `EARNINGS_CALENDAR_PROVIDER=finnhub` and `FINNHUB_API_KEY` is set, we hit
+  Finnhub's `/calendar/earnings`. Any other configuration (default or vendor
+  failure) records `earnings_source='keyword_fallback'`. The provenance is
+  stored on every `pre_flags` row; a missing-key or outage can never look
+  like a real-calendar check happened.
+- **EDGAR offering parser (metadata only).** Looks at the SEC submissions
+  JSON for 424B / FWP / S-1 / S-3 filings within `OFFERING_LOOKBACK_DAYS`.
+  No HTML parsing. EDGAR failures degrade to "no signal" with a descriptive
+  note; they cannot fabricate an AVOID. SEC requires a descriptive
+  `EDGAR_USER_AGENT` per request.
+- **Screen-time corporate-action skip.** Per-candidate
+  `getCorporateActions` over `[signal-30d, signal+10d]` (configurable). Any
+  split or special-cash dividend (`dividend_type='SC'`) marks
+  `auto_disposition='SKIP'` before AI spend.
+
+`pre_flags` columns added in PR 3: `corp_action_in_window`,
+`earnings_source`, `offering_source`, `reasons` (JSONB).
+
 ### Runtime safety (PR 2)
 
 Every external HTTP call has an `AbortSignal`-driven per-request timeout

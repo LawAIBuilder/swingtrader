@@ -41,6 +41,19 @@ CREATE TABLE IF NOT EXISTS bounce_trader.pre_flags (
   dividend_suspended BOOLEAN,
   liquidity_ok BOOLEAN,
   wash_sale_lockout BOOLEAN,
+  -- PR 3: skip the candidate entirely if a split/reverse-split/special dividend
+  -- falls within [signal_date - 30d, signal_date + 10d]. Phase 1A is skip-first;
+  -- back-adjustment of historical bars is intentionally deferred.
+  corp_action_in_window BOOLEAN NOT NULL DEFAULT FALSE,
+  -- PR 3: explicit provenance for each detection so 'keyword fallback' rows are
+  -- never confused with real provider answers. earnings_source: 'keyword_fallback'
+  -- (default) or 'finnhub' (when FINNHUB_API_KEY is configured). offering_source:
+  -- 'none', 'keyword' (news regex), or 'edgar' (424B/FWP/S-1/S-3 within lookback).
+  earnings_source TEXT NOT NULL DEFAULT 'keyword_fallback',
+  offering_source TEXT NOT NULL DEFAULT 'none',
+  -- Structured list of reasons that drove auto_disposition. Stored as JSONB so
+  -- the dashboard can filter without re-deriving from the booleans.
+  reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
   auto_disposition TEXT CHECK (auto_disposition IN ('AVOID', 'BLACKOUT', 'OK_FOR_AI', 'SKIP')),
   flags_run_at TIMESTAMPTZ DEFAULT NOW()
 );

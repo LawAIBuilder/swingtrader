@@ -1,7 +1,12 @@
 import { env, requireEnv } from '@/lib/env';
 import { timedFetch } from '@/lib/utils/timed-fetch';
-import type { CorporateActionResult, DailyBar, NewsItem, TickerDetails } from '@/types/app';
+import type { CorporateActionResult, DailyBar, DividendType, NewsItem, TickerDetails } from '@/types/app';
 import type { MarketDataClient } from './client';
+
+function parseDividendType(value: unknown): DividendType {
+  if (value === 'CD' || value === 'SC' || value === 'LT' || value === 'ST') return value;
+  return 'unknown';
+}
 
 interface PolygonGroupedAgg {
   T: string;
@@ -178,6 +183,7 @@ export class PolygonClient implements MarketDataClient {
       dividends: (dividendsJson.results ?? []).map((r) => ({
         exDividendDate: typeof r.ex_dividend_date === 'string' ? r.ex_dividend_date : undefined,
         cashAmount: typeof r.cash_amount === 'number' ? r.cash_amount : undefined,
+        dividendType: parseDividendType(r.dividend_type),
         raw: r
       }))
     };

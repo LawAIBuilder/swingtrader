@@ -66,7 +66,18 @@ const EnvSchema = z.object({
   ANTHROPIC_TIMEOUT_MS: z.string().optional(),
   GROUPED_BARS_CONCURRENCY: z.string().optional(),
   ANTHROPIC_CONCURRENCY: z.string().optional(),
-  RUN_LOCK_TTL_MS: z.string().optional()
+  RUN_LOCK_TTL_MS: z.string().optional(),
+
+  EARNINGS_CALENDAR_PROVIDER: z.string().optional(),
+  FINNHUB_API_KEY: z.string().optional(),
+  FINNHUB_BASE_URL: z.string().optional(),
+  EDGAR_ENABLED: z.string().optional(),
+  EDGAR_USER_AGENT: z.string().optional(),
+  EDGAR_BASE_URL: z.string().optional(),
+  EDGAR_TICKERS_URL: z.string().optional(),
+  CORP_ACTION_LOOKBACK_DAYS: z.string().optional(),
+  CORP_ACTION_LOOKAHEAD_DAYS: z.string().optional(),
+  OFFERING_LOOKBACK_DAYS: z.string().optional()
 }).passthrough();
 
 const raw = EnvSchema.parse(process.env);
@@ -128,7 +139,33 @@ export const env = {
   anthropicConcurrency: parseNum(raw.ANTHROPIC_CONCURRENCY, 2),
   // Stale-lock TTL. A 'running' run_logs row older than this is treated as a
   // crashed prior run and is reaped before a new run acquires the lock.
-  runLockTtlMs: parseNum(raw.RUN_LOCK_TTL_MS, 600_000)
+  runLockTtlMs: parseNum(raw.RUN_LOCK_TTL_MS, 600_000),
+
+  // PR 3: provider abstraction for the earnings calendar. 'keyword_fallback'
+  // (default) reuses the news regex; 'finnhub' hits the Finnhub calendar API
+  // when FINNHUB_API_KEY is set. Any unrecognized value still falls back to
+  // keyword detection so production cannot silently behave like a real
+  // calendar check happened.
+  earningsCalendarProvider: raw.EARNINGS_CALENDAR_PROVIDER ?? 'keyword_fallback',
+  finnhubApiKey: raw.FINNHUB_API_KEY,
+  finnhubBaseUrl: raw.FINNHUB_BASE_URL ?? 'https://finnhub.io/api/v1',
+
+  // EDGAR offering-filing parser. Enabled by default if a User-Agent is
+  // configured, since SEC requires one for any traffic. Disable explicitly
+  // with EDGAR_ENABLED=false in dev to skip the network calls.
+  edgarEnabled: parseBool(raw.EDGAR_ENABLED, true),
+  edgarUserAgent: raw.EDGAR_USER_AGENT ?? 'BounceTrader/0.1 contact@example.com',
+  edgarBaseUrl: raw.EDGAR_BASE_URL ?? 'https://data.sec.gov',
+  edgarTickersUrl: raw.EDGAR_TICKERS_URL ?? 'https://www.sec.gov/files/company_tickers.json',
+
+  // Window for the screen-time corporate-action skip. Lookback covers historic
+  // splits whose effect on the 20d lookback metrics may persist; lookahead
+  // covers actions inside the time-stop horizon.
+  corpActionLookbackDays: parseNum(raw.CORP_ACTION_LOOKBACK_DAYS, 30),
+  corpActionLookaheadDays: parseNum(raw.CORP_ACTION_LOOKAHEAD_DAYS, 10),
+  // How far back to search EDGAR for offering filings. 30d catches recent
+  // pricings (424B*) without diluting the signal with old shelf registrations.
+  offeringLookbackDays: parseNum(raw.OFFERING_LOOKBACK_DAYS, 30)
 };
 
 export function requireEnv(name: string, value: string | undefined): string {

@@ -41,9 +41,19 @@ export interface NewsItem {
   insights?: Array<{ ticker?: string; sentiment?: string; sentiment_reasoning?: string }>;
 }
 
+// Polygon dividend_type codes. CD = ordinary cash; SC = special cash;
+// LT = long-term capital gain; ST = short-term. Treated as 'unknown' if the
+// vendor omits the field.
+export type DividendType = 'CD' | 'SC' | 'LT' | 'ST' | 'unknown';
+
 export interface CorporateActionResult {
   splits: Array<{ executionDate?: string; splitFrom?: number; splitTo?: number; raw: unknown }>;
-  dividends: Array<{ exDividendDate?: string; cashAmount?: number; raw: unknown }>;
+  dividends: Array<{
+    exDividendDate?: string;
+    cashAmount?: number;
+    dividendType: DividendType;
+    raw: unknown;
+  }>;
 }
 
 export interface TickerMetrics {

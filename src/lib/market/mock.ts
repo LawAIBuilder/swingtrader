@@ -92,3 +92,4 @@ export class MockMarketDataClient implements MarketDataClient {
     return { splits: [], dividends: [] };
   }
 }
+

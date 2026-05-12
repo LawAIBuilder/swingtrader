@@ -1,15 +1,18 @@
 import { env } from '@/lib/env';
 import { analyzeWithClaude, syntheticAnalysisForDisposition } from '@/lib/ai/analyzer';
 import { buildCatalystEvidence } from '@/lib/catalysts/evidence';
+import { checkRecentOfferingFiling } from '@/lib/edgar/client';
 import { getMarketDataClient } from '@/lib/market/provider';
 import { evaluatePreFlags } from '@/lib/preflags';
 import { computeSlippage, computeStopAndTarget } from '@/lib/risk';
 import { MarketDataNotSettledError, runScreener } from '@/lib/screener/run';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
-import { nextBusinessDay } from '@/lib/utils/dates';
+import { addDays, nextBusinessDay } from '@/lib/utils/dates';
 import { round } from '@/lib/utils/numbers';
 import { withRunLog } from '@/lib/run-log';
-import type { CandidateRow, EntryMode, ScreenedCandidate } from '@/types/app';
+import type { CandidateRow, CorporateActionResult, EntryMode, ScreenedCandidate } from '@/types/app';
+import type { OfferingCheckResult } from '@/lib/edgar/client';
+import type { MarketDataClient } from '@/lib/market/client';
 
 export interface ScreenerJobResult {
   runDate: string;
@@ -72,11 +75,39 @@ async function upsertPreFlags(candidateId: number, flags: Awaited<ReturnType<typ
       dividend_suspended: flags.dividend_suspended,
       liquidity_ok: flags.liquidity_ok,
       wash_sale_lockout: flags.wash_sale_lockout,
+      corp_action_in_window: flags.corp_action_in_window,
+      earnings_source: flags.earnings_source,
+      offering_source: flags.offering_source,
+      reasons: flags.reasons,
       auto_disposition: flags.auto_disposition
     },
     { onConflict: 'candidate_id' }
   );
   if (error) throw error;
+}
+
+// Per-candidate corp-action probe. Looks at the configured window around the
+// signal date for splits and special dividends. Tolerates vendor failures by
+// returning an empty result so a transient outage cannot retroactively trip
+// the SKIP path.
+async function fetchCandidateCorporateActions(candidate: ScreenedCandidate, marketClient: MarketDataClient): Promise<CorporateActionResult> {
+  const fromDate = addDays(candidate.date, -env.corpActionLookbackDays);
+  const toDate = addDays(candidate.date, env.corpActionLookaheadDays);
+  return marketClient
+    .getCorporateActions(candidate.ticker, fromDate, toDate)
+    .catch(() => ({ splits: [], dividends: [] }));
+}
+
+// Per-candidate EDGAR offering probe. Returns null when EDGAR is disabled in
+// env so callers can distinguish "no signal" from "we did not check".
+async function fetchOfferingFiling(candidate: ScreenedCandidate): Promise<OfferingCheckResult | null> {
+  if (!env.edgarEnabled) return null;
+  const fromDate = addDays(candidate.date, -env.offeringLookbackDays);
+  return checkRecentOfferingFiling({
+    ticker: candidate.ticker,
+    fromDate,
+    toDate: candidate.date
+  });
 }
 
 async function insertAnalysis(candidateId: number, result: Awaited<ReturnType<typeof analyzeWithClaude>>) {
@@ -207,7 +238,22 @@ export async function runScreenerJob(options: RunScreenerJobOptions = {}): Promi
         const evidence = await buildCatalystEvidence(candidate, marketClient);
         await upsertCatalysts(candidateRow.id, evidence, JSON.stringify(evidence).length);
 
-        const flags = await evaluatePreFlags(candidate, candidateRow, evidence.news);
+        // PR 3: corp-action and EDGAR signals are gathered alongside the news
+        // packet so evaluatePreFlags stays pure (no network in the pre-flag
+        // logic itself). EDGAR failures degrade to "no signal" so a vendor
+        // outage cannot fabricate an AVOID.
+        const [corporateActions, offering] = await Promise.all([
+          fetchCandidateCorporateActions(candidate, marketClient),
+          fetchOfferingFiling(candidate)
+        ]);
+
+        const flags = await evaluatePreFlags({
+          candidate,
+          persistedCandidate: candidateRow,
+          news: evidence.news,
+          corporateActions,
+          offering
+        });
         await upsertPreFlags(candidateRow.id, flags);
 
         if (flags.auto_disposition === 'SKIP') {
