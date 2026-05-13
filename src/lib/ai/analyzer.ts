@@ -204,3 +204,32 @@ export function syntheticAnalysisForDisposition(disposition: 'AVOID' | 'BLACKOUT
     modelName: 'preflag-rules'
   };
 }
+
+// Used by the screener when AI_DAILY_BUDGET_USD has been exceeded mid-run.
+// Returns a PASS (not AVOID): we have nothing against the candidate, we
+// just didn't analyze it. This keeps the row in the dataset for later
+// counterfactual analysis without falsely labeling it AVOID.
+export function passForBudgetExhausted(reasons: string[]): AnalysisResult {
+  const output: AnalysisOutput = {
+    tier: 'PASS',
+    thesis:
+      'AI daily budget cap reached before this candidate was analyzed. ' +
+      'Marked PASS so the row is recorded without triggering a paper entry.',
+    selloff_type: 'unknown',
+    day_of_drop: 1,
+    invalidation_reason: 'No qualitative analysis was performed.',
+    risk_flags: ['ai_budget_exhausted', ...reasons],
+    confidence_in_tier: 'low'
+  };
+  return {
+    output,
+    rawResponse: JSON.stringify(output),
+    schemaValid: true,
+    retryCount: 0,
+    tokensUsed: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    estimatedCostUsd: 0,
+    modelName: 'budget-fallback'
+  };
+}

@@ -75,7 +75,11 @@ export default function SettingsPage() {
         { label: 'PROMPT_VERSION', value: env.promptVersion },
         { label: 'USE_MOCK_AI', value: String(env.useMockAi) },
         { label: 'ANTHROPIC_TIMEOUT_MS', value: env.anthropicTimeoutMs },
-        { label: 'ANTHROPIC_CONCURRENCY', value: env.anthropicConcurrency }
+        { label: 'ANTHROPIC_CONCURRENCY', value: env.anthropicConcurrency },
+        {
+          label: 'AI_DAILY_BUDGET_USD',
+          value: env.aiDailyBudgetUsd === 0 ? 'unlimited (cap disabled)' : `$${env.aiDailyBudgetUsd.toFixed(2)}`
+        }
       ]
     },
     {

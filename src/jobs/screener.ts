@@ -1,5 +1,6 @@
 import { env } from '@/lib/env';
-import { analyzeWithClaude, syntheticAnalysisForDisposition } from '@/lib/ai/analyzer';
+import { analyzeWithClaude, passForBudgetExhausted, syntheticAnalysisForDisposition } from '@/lib/ai/analyzer';
+import { logWarn } from '@/lib/log';
 import { seedBaselinesForCandidate } from '@/lib/baselines';
 import { buildCatalystEvidence } from '@/lib/catalysts/evidence';
 import { checkRecentOfferingFiling } from '@/lib/edgar/client';
@@ -24,6 +25,14 @@ export interface ScreenerJobResult {
   baselinesSeeded: number;
   skipped: number;
   aiCalls: number;
+  // True iff the AI_DAILY_BUDGET_USD cap was hit during this run and at least
+  // one candidate was forced into the synthetic-fallback path. Surfaced in
+  // run_logs.details so the dashboard can show "AI budget exhausted" without
+  // requiring a separate query.
+  aiBudgetExhausted: boolean;
+  // Cumulative cost (in USD) of AI calls in this run. Useful for the operator
+  // even when the cap is disabled: it answers "what would today have cost".
+  aiCostUsdThisRun: number;
   notSettled?: { dataDate: string };
   // Always populated. The dashboard reads this to show provider name, base URL,
   // freshness mode, and the first few vendor errors. On not-settled runs this
@@ -232,6 +241,8 @@ export async function runScreenerJob(options: RunScreenerJobOptions = {}): Promi
           baselinesSeeded: 0,
           skipped: 0,
           aiCalls: 0,
+          aiBudgetExhausted: false,
+          aiCostUsdThisRun: 0,
           notSettled: { dataDate: err.dataDate },
           diagnostics: err.diagnostics,
           errors: []
@@ -245,6 +256,9 @@ export async function runScreenerJob(options: RunScreenerJobOptions = {}): Promi
     let baselinesSeeded = 0;
     let skipped = 0;
     let aiCalls = 0;
+    let aiCostUsdThisRun = 0;
+    let aiBudgetExhausted = false;
+    const aiBudgetCap = env.aiDailyBudgetUsd;
 
     for (const candidate of result.candidates) {
       try {
@@ -287,13 +301,47 @@ export async function runScreenerJob(options: RunScreenerJobOptions = {}): Promi
           continue;
         }
 
-        const analysisResult = flags.auto_disposition === 'OK_FOR_AI'
-          ? await analyzeWithClaude(evidence)
-          : syntheticAnalysisForDisposition(flags.auto_disposition, flags.reasons);
+        // Budget short-circuit: once cumulative AI spend in this run exceeds
+        // AI_DAILY_BUDGET_USD, every remaining OK_FOR_AI candidate switches to
+        // the synthetic analyzer (which costs nothing). The first time we
+        // do this we log a single warn line so the operator notices on the
+        // very next dashboard refresh; subsequent skips stay quiet.
+        const wouldCallAI = flags.auto_disposition === 'OK_FOR_AI';
+        const overBudget = aiBudgetCap > 0 && aiCostUsdThisRun >= aiBudgetCap;
+        const useFallbackForBudget = wouldCallAI && overBudget;
+        if (useFallbackForBudget && !aiBudgetExhausted) {
+          aiBudgetExhausted = true;
+          logWarn('ai_budget_exhausted', {
+            runDate: result.runDate,
+            cap: aiBudgetCap,
+            spent: aiCostUsdThisRun,
+            remainingCandidates: result.candidates.length - result.candidates.indexOf(candidate)
+          });
+        }
 
-        if (flags.auto_disposition === 'OK_FOR_AI' && analysisResult.modelName !== 'mock-ai') aiCalls += 1;
+        let analysisResult: Awaited<ReturnType<typeof analyzeWithClaude>>;
+        if (useFallbackForBudget) {
+          analysisResult = passForBudgetExhausted(flags.reasons);
+        } else if (wouldCallAI) {
+          analysisResult = await analyzeWithClaude(evidence);
+        } else {
+          // Pre-flag exclusion path: disposition is 'AVOID' or 'BLACKOUT'.
+          analysisResult = syntheticAnalysisForDisposition(
+            flags.auto_disposition as 'AVOID' | 'BLACKOUT',
+            flags.reasons
+          );
+        }
+
+        if (wouldCallAI && !useFallbackForBudget && analysisResult.modelName !== 'mock-ai') {
+          aiCalls += 1;
+          aiCostUsdThisRun += analysisResult.estimatedCostUsd ?? 0;
+        }
         const analysis = await insertAnalysis(candidateRow.id, analysisResult);
-        const effectiveTier = flags.auto_disposition === 'OK_FOR_AI' ? analysisResult.output.tier : flags.auto_disposition;
+        const effectiveTier = wouldCallAI && !useFallbackForBudget
+          ? analysisResult.output.tier
+          : useFallbackForBudget
+            ? 'PASS'
+            : flags.auto_disposition;
         const created = await createPaperTrade(candidate, candidateRow, analysis.id, effectiveTier, env.entryMode);
         if (created) paperTradesCreated += 1;
       } catch (err) {
@@ -310,6 +358,8 @@ export async function runScreenerJob(options: RunScreenerJobOptions = {}): Promi
       baselinesSeeded,
       skipped,
       aiCalls,
+      aiBudgetExhausted,
+      aiCostUsdThisRun,
       diagnostics: result.diagnostics,
       errors
     };

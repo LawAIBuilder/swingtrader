@@ -93,6 +93,7 @@ const EnvSchema = z.object({
 
   FETCH_TIMEOUT_MS: z.string().optional(),
   ANTHROPIC_TIMEOUT_MS: z.string().optional(),
+  AI_DAILY_BUDGET_USD: z.string().optional(),
   GROUPED_BARS_CONCURRENCY: z.string().optional(),
   ANTHROPIC_CONCURRENCY: z.string().optional(),
   RUN_LOCK_TTL_MS: z.string().optional(),
@@ -195,6 +196,12 @@ export const env = {
   fetchTimeoutMs: parseNum(raw.FETCH_TIMEOUT_MS, 15_000),
   // Per-request timeout passed to the Anthropic SDK.
   anthropicTimeoutMs: parseNum(raw.ANTHROPIC_TIMEOUT_MS, 30_000),
+  // Soft per-day cap on accumulated AI spend across the screener. When the
+  // running total exceeds this value, remaining candidates fall back to the
+  // synthetic deterministic analyzer (auto_disposition='OK_FOR_AI' becomes
+  // a PASS with reason='ai_budget_exhausted'). 0 disables the cap. Set this
+  // even on day one to bound a runaway-loop blast radius.
+  aiDailyBudgetUsd: parseNum(raw.AI_DAILY_BUDGET_USD, 0),
   // Concurrency cap for the lookback grouped-bar fetch in the screener.
   groupedBarsConcurrency: parseNum(raw.GROUPED_BARS_CONCURRENCY, 4),
   // Concurrency cap for Anthropic messages.create. Wraps every analyzer call so
