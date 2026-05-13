@@ -330,6 +330,14 @@ export interface SystemState {
   // POLYGON_NOT_AUTHORIZED sample. This is the single most common production
   // misconfiguration and is called out explicitly in the UI.
   polygonNotAuthorized?: { sample: string; ranAt: string };
+  // Set when the most recent screener run hit the AI_DAILY_BUDGET_USD cap and
+  // routed candidates to the synthetic-fallback PASS analyzer. Surfaced as a
+  // banner so an operator notices on the next dashboard refresh.
+  aiBudgetExhaustedToday?: { runDate: string; spent: number; cap: number; ranAt: string };
+  // Set iff CRON_SECRET is unset AND ALLOW_UNAUTHENTICATED_CRON=true on this
+  // deployment. That combination is only safe for local dev; surfacing it in
+  // the dashboard makes a misconfigured production deploy obvious.
+  cronOpenToPublic: boolean;
 }
 
 function parseDetails(row: RunLogRow | undefined): Record<string, unknown> | null {
@@ -355,6 +363,7 @@ export function deriveSystemState(runLogs: RunLogRow[]): SystemState {
   let latestDataDate: string | null = null;
   let lastNotSettled: SystemState['lastNotSettled'] | undefined;
   let polygonNotAuthorized: SystemState['polygonNotAuthorized'] | undefined;
+  let aiBudgetExhaustedToday: SystemState['aiBudgetExhaustedToday'] | undefined;
 
   for (const row of runLogs) {
     if (row.job_name !== 'screener') continue;
@@ -382,7 +391,15 @@ export function deriveSystemState(runLogs: RunLogRow[]): SystemState {
         }
       }
     }
-    if (latestDataDate && lastNotSettled && polygonNotAuthorized) break;
+    if (!aiBudgetExhaustedToday && result.aiBudgetExhausted === true) {
+      aiBudgetExhaustedToday = {
+        runDate: typeof result.runDate === 'string' ? result.runDate : row.run_date,
+        spent: typeof result.aiCostUsdThisRun === 'number' ? result.aiCostUsdThisRun : 0,
+        cap: env.aiDailyBudgetUsd,
+        ranAt: row.ran_at
+      };
+    }
+    if (latestDataDate && lastNotSettled && polygonNotAuthorized && aiBudgetExhaustedToday) break;
   }
 
   const aiMode: 'mock' | 'anthropic' = env.useMockAi || !env.anthropicApiKey ? 'mock' : 'anthropic';
@@ -406,7 +423,9 @@ export function deriveSystemState(runLogs: RunLogRow[]): SystemState {
     latestSummary,
     latestDataDate,
     lastNotSettled,
-    polygonNotAuthorized
+    polygonNotAuthorized,
+    aiBudgetExhaustedToday,
+    cronOpenToPublic: !env.cronSecret && env.allowUnauthenticatedCron
   };
 }
 

@@ -133,6 +133,29 @@ export function SystemStatus({ state }: { state: SystemState }) {
           real Claude analyses.
         </div>
       ) : null}
+
+      {state.aiBudgetExhaustedToday ? (
+        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          <strong>AI daily budget cap hit.</strong> The screener run for{' '}
+          <code>{state.aiBudgetExhaustedToday.runDate}</code> spent{' '}
+          ${state.aiBudgetExhaustedToday.spent.toFixed(4)} against a cap of $
+          {state.aiBudgetExhaustedToday.cap.toFixed(2)} ({formatRelative(state.aiBudgetExhaustedToday.ranAt)}).
+          Remaining candidates were routed to the deterministic PASS analyzer
+          for the rest of that run. Cap resets at 00:00 UTC.
+        </div>
+      ) : null}
+
+      {state.cronOpenToPublic ? (
+        <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900">
+          <strong>Cron is unauthenticated on this deployment.</strong>{' '}
+          <code>CRON_SECRET</code> is unset and{' '}
+          <code>ALLOW_UNAUTHENTICATED_CRON=true</code>, which means anyone on the
+          internet can hit <code>/api/jobs/*</code> and{' '}
+          <code>/api/broker/cancel-all</code>. This is only safe for local dev.
+          Rotate a fresh <code>CRON_SECRET</code> in and redeploy before exposing
+          this URL.
+        </div>
+      ) : null}
     </section>
   );
 }

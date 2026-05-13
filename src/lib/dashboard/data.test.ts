@@ -43,7 +43,8 @@ vi.mock('@/lib/supabase/public', () => ({
   })
 }));
 
-const { fetchDashboardData } = await import('./data');
+const { fetchDashboardData, deriveSystemState } = await import('./data');
+type RunLogRow = Parameters<typeof deriveSystemState>[0][number];
 
 beforeEach(() => {
   queue.clear();
@@ -87,5 +88,61 @@ describe('fetchDashboardData error surfacing', () => {
     expect(captured).toBeDefined();
     expect(captured.length).toBeLessThanOrEqual(201 + 1); // 200 + ellipsis
     expect(captured.endsWith('…')).toBe(true);
+  });
+});
+
+describe('deriveSystemState', () => {
+  function row(overrides: Partial<RunLogRow>): RunLogRow {
+    return {
+      id: 1,
+      run_date: '2026-05-11',
+      job_name: 'screener',
+      status: 'success',
+      details: null,
+      duration_ms: 100,
+      ran_at: '2026-05-11T20:00:00Z',
+      ...overrides
+    } as RunLogRow;
+  }
+
+  it('flips aiBudgetExhaustedToday when the most recent screener run hit the cap', () => {
+    const state = deriveSystemState([
+      row({
+        details: {
+          result: {
+            runDate: '2026-05-11',
+            dataDate: '2026-05-11',
+            aiBudgetExhausted: true,
+            aiCostUsdThisRun: 1.2345,
+            diagnostics: {}
+          }
+        }
+      })
+    ]);
+    expect(state.aiBudgetExhaustedToday).toBeDefined();
+    expect(state.aiBudgetExhaustedToday?.runDate).toBe('2026-05-11');
+    expect(state.aiBudgetExhaustedToday?.spent).toBeCloseTo(1.2345);
+  });
+
+  it('leaves aiBudgetExhaustedToday undefined when the cap was not hit', () => {
+    const state = deriveSystemState([
+      row({
+        details: {
+          result: {
+            runDate: '2026-05-11',
+            dataDate: '2026-05-11',
+            aiBudgetExhausted: false,
+            aiCostUsdThisRun: 0.4,
+            diagnostics: {}
+          }
+        }
+      })
+    ]);
+    expect(state.aiBudgetExhaustedToday).toBeUndefined();
+  });
+
+  it('cronOpenToPublic is false in this test env (CRON_SECRET unset, ALLOW_UNAUTHENTICATED_CRON unset)', () => {
+    const state = deriveSystemState([]);
+    expect(state.cronOpenToPublic).toBe(false);
   });
 });
