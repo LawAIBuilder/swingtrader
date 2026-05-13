@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 interface FakeFromCall {
   table: string;
@@ -21,6 +21,13 @@ const tableData: Record<string, unknown[]> = {
     { ticker: 'TSLA', effective_tier: 'PASS', exit_reason: 'stop', pnl_pct_net: -0.025 }
   ],
   v_ai_cost_daily: [{ total_cost_usd: 0.0142, total_calls: 3 }],
+  run_logs: [
+    {
+      status: 'success',
+      ran_at: '2026-05-11T20:00:00Z',
+      details: { result: { runDate: '2026-05-11', dataDate: '2026-05-11', diagnostics: {} } }
+    }
+  ],
   v_basic_stats_by_tier: [
     { group_key: 'BUY', closed_trades: 12, win_rate: 0.58, avg_pnl_net: 0.012, ambiguous_rate: 0.08 },
     { group_key: 'PASS', closed_trades: 5, win_rate: 0.4, avg_pnl_net: -0.005, ambiguous_rate: 0.0 }
@@ -46,10 +53,13 @@ vi.mock('@/lib/supabase/admin', () => ({
           return builder;
         },
         order() {
+          return builder;
+        },
+        limit() {
           return resolveSelect();
         },
-        // For v_ai_cost_daily we don't .order() so the chain ends at .eq(...).
-        // The fake resolves on .then() to support that case.
+        // For chains that end before .order()/.limit() the fake resolves on
+        // .then() so we don't deadlock on partial chain shapes.
         then(resolve: (v: unknown) => unknown) {
           return resolveSelect().then(resolve);
         }
@@ -72,6 +82,18 @@ vi.mock('@/lib/supabase/admin', () => ({
 const { renderDailySummary } = await import('./summary');
 
 describe('renderDailySummary', () => {
+  beforeEach(() => {
+    // Reset to the default success-path screener run between tests so each
+    // case starts from the no-alerts baseline.
+    tableData.run_logs = [
+      {
+        status: 'success',
+        ran_at: '2026-05-11T20:00:00Z',
+        details: { result: { runDate: '2026-05-11', dataDate: '2026-05-11', diagnostics: {} } }
+      }
+    ];
+  });
+
   it('renders a complete markdown summary including counts, trades, and AI cost', async () => {
     const md = await renderDailySummary('2026-05-11');
     expect(md).toContain('# Bounce Trader Daily Summary - 2026-05-11');
@@ -97,5 +119,72 @@ describe('renderDailySummary', () => {
     expect(md).toContain('BUY: 12 closed');
     expect(md).toContain('## Stats by screen (rolling)');
     expect(md).toContain('screen_a: 9 closed');
+
+    // No alerts on the happy path: that section should be absent entirely.
+    expect(md).not.toContain('## Alerts');
+  });
+
+  it('renders an Alerts section when the most recent screener run hit AI budget cap', async () => {
+    tableData.run_logs = [
+      {
+        status: 'success',
+        ran_at: '2026-05-11T20:00:00Z',
+        details: {
+          result: {
+            runDate: '2026-05-11',
+            dataDate: '2026-05-11',
+            aiBudgetExhausted: true,
+            aiCostUsdThisRun: 0.5,
+            diagnostics: {}
+          }
+        }
+      }
+    ];
+    const md = await renderDailySummary('2026-05-11');
+    expect(md).toContain('## Alerts');
+    expect(md).toContain('AI daily budget cap hit');
+    expect(md).toContain('$0.5000');
+  });
+
+  it('renders Alerts when stale data was refused', async () => {
+    tableData.run_logs = [
+      {
+        status: 'partial',
+        ran_at: '2026-05-11T20:00:00Z',
+        details: {
+          result: {
+            runDate: '2026-05-11',
+            dataDate: null,
+            notSettled: { dataDate: '2026-05-08' },
+            diagnostics: {}
+          }
+        }
+      }
+    ];
+    const md = await renderDailySummary('2026-05-11');
+    expect(md).toContain('## Alerts');
+    expect(md).toContain('Stale data refused');
+    expect(md).toContain('2026-05-08');
+  });
+
+  it('renders Alerts when polygon NOT_AUTHORIZED appears in diagnostics', async () => {
+    tableData.run_logs = [
+      {
+        status: 'partial',
+        ran_at: '2026-05-11T20:00:00Z',
+        details: {
+          result: {
+            runDate: '2026-05-11',
+            dataDate: '2026-05-10',
+            diagnostics: {
+              errorSamples: ['POLYGON_NOT_AUTHORIZED 403 /v2/aggs/grouped/...: forbidden']
+            }
+          }
+        }
+      }
+    ];
+    const md = await renderDailySummary('2026-05-11');
+    expect(md).toContain('## Alerts');
+    expect(md).toContain('Polygon NOT_AUTHORIZED');
   });
 });

@@ -30,6 +30,52 @@ interface AiCostRow {
   total_calls: number | null;
 }
 
+interface ScreenerRunLog {
+  status: string;
+  details: Record<string, unknown> | null;
+  ran_at: string;
+}
+
+// Pull alerts for a runDate by scanning the most recent screener run_log for
+// that date. Returns an array of human-readable bullet strings; empty when no
+// alerts apply. We keep this loose-typed because run_logs.details is stored
+// as JSON and we read across multiple result shapes (notSettled, AI budget
+// exhaust, NOT_AUTHORIZED) without a hard schema.
+function extractAlerts(row: ScreenerRunLog | undefined): string[] {
+  if (!row) return [];
+  const details = (row.details ?? {}) as Record<string, unknown>;
+  const result = (details.result ?? {}) as Record<string, unknown>;
+  const alerts: string[] = [];
+  if (result.notSettled) {
+    const ns = result.notSettled as Record<string, unknown>;
+    const dataDate = typeof ns.dataDate === 'string' ? ns.dataDate : 'unknown';
+    alerts.push(
+      `Stale data refused: provider's latest bar was ${dataDate} on this run, so no trades were entered.`
+    );
+  }
+  if (result.aiBudgetExhausted === true) {
+    const spent = typeof result.aiCostUsdThisRun === 'number' ? result.aiCostUsdThisRun : null;
+    alerts.push(
+      `AI daily budget cap hit. Spent $${(spent ?? 0).toFixed(4)} this run; remaining candidates fell back to deterministic PASS analyzer.`
+    );
+  }
+  const diagnostics = (result.diagnostics ?? {}) as Record<string, unknown>;
+  const samples = diagnostics.errorSamples;
+  if (Array.isArray(samples)) {
+    const notAuth = samples.find((s) => typeof s === 'string' && s.includes('POLYGON_NOT_AUTHORIZED'));
+    if (typeof notAuth === 'string') {
+      alerts.push(
+        'Polygon NOT_AUTHORIZED: at least one grouped-bars request was refused. Upgrade the Polygon plan.'
+      );
+    }
+  }
+  if (row.status === 'failed') {
+    const err = typeof details.error === 'string' ? details.error : null;
+    alerts.push(`Screener run failed: ${err ?? 'see /runs for details'}`);
+  }
+  return alerts;
+}
+
 export async function renderDailySummary(runDate: string): Promise<string> {
   const supabase = getSupabaseAdmin();
   const [
@@ -37,6 +83,7 @@ export async function renderDailySummary(runDate: string): Promise<string> {
     { data: openTrades },
     { data: closedTrades },
     { data: aiCostRows },
+    { data: screenerRunLogs },
     tierStats,
     screenStats
   ] = await Promise.all([
@@ -44,6 +91,7 @@ export async function renderDailySummary(runDate: string): Promise<string> {
     supabase.from('paper_trades').select('ticker,effective_tier,entry_price,stop_price,target_price').eq('status', 'open').order('entry_date'),
     supabase.from('paper_trades').select('ticker,effective_tier,exit_reason,pnl_pct_net').eq('exit_date', runDate).order('ticker'),
     supabase.from('v_ai_cost_daily').select('total_cost_usd,total_calls').eq('day', runDate),
+    supabase.from('run_logs').select('status,details,ran_at').eq('job_name', 'screener').eq('run_date', runDate).order('ran_at', { ascending: false }).limit(1),
     getStatsByTier(),
     getStatsByScreen()
   ]);
@@ -52,6 +100,8 @@ export async function renderDailySummary(runDate: string): Promise<string> {
   const openTradeRows = (openTrades ?? []) as unknown as OpenTradeRow[];
   const closedTradeRows = (closedTrades ?? []) as unknown as ClosedTradeRow[];
   const aiCost = ((aiCostRows ?? []) as unknown as AiCostRow[])[0];
+  const latestScreenerRun = ((screenerRunLogs ?? []) as unknown as ScreenerRunLog[])[0];
+  const alerts = extractAlerts(latestScreenerRun);
 
   const closedTotalNet = closedTradeRows.reduce((acc, r) => acc + (r.pnl_pct_net ?? 0), 0);
   const closedAvgNet = closedTradeRows.length > 0 ? closedTotalNet / closedTradeRows.length : 0;
@@ -60,6 +110,14 @@ export async function renderDailySummary(runDate: string): Promise<string> {
   const lines: string[] = [];
   lines.push(`# Bounce Trader Daily Summary - ${runDate}`);
   lines.push('');
+
+  if (alerts.length > 0) {
+    lines.push('## Alerts');
+    for (const a of alerts) {
+      lines.push(`- ${a}`);
+    }
+    lines.push('');
+  }
 
   lines.push('## Today summary');
   lines.push(`- Candidates: ${candidateRows.length}`);
