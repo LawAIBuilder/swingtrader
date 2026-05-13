@@ -73,6 +73,13 @@ const summaryActions: Action[] = [
       'Idempotent for the same runDate (one email per UTC date). Skips if Resend is not configured.',
     curl: `curl -X POST '${baseUrl}/api/jobs/summary?force=true' \\
   -H 'Authorization: Bearer $CRON_SECRET'`
+  },
+  {
+    title: 'Preview daily summary without sending (dry run)',
+    description:
+      'Renders the markdown body and returns it inline. Skips email send and Supabase upsert so you can iterate on renderDailySummary without paging anyone or stomping the canonical daily_summaries row.',
+    curl: `curl -X POST '${baseUrl}/api/jobs/summary?dryRun=true&force=true' \\
+  -H 'Authorization: Bearer $CRON_SECRET'`
   }
 ];
 

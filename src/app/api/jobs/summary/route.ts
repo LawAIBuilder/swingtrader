@@ -16,8 +16,13 @@ async function handle(req: NextRequest) {
     return unauthorizedResponse();
   }
   const invocation = await readJobInvocation(req);
+  // Summary-specific knob: `dryRun=true` renders the markdown without
+  // sending email or upserting daily_summaries. Useful for previewing a
+  // changed renderDailySummary without paging the operator.
+  const url = new URL(req.url);
+  const dryRun = url.searchParams.get('dryRun') === '1' || url.searchParams.get('dryRun') === 'true';
   try {
-    const result = await runDailySummaryJob(invocation);
+    const result = await runDailySummaryJob({ ...invocation, dryRun });
     return NextResponse.json(result);
   } catch (err) {
     return jobErrorResponse('daily_summary', invocation.runDate, err);

@@ -19,11 +19,19 @@ export interface SummaryJobResult {
   // persisted — that's a real operator-visible failure even though the job
   // technically completed.
   errors: Array<{ stage: string; message: string }>;
+  // When dryRun=true, the job renders the markdown but skips email send and
+  // Supabase persist. Useful for operator preview without polluting the
+  // daily_summaries table or sending a duplicate email. The markdown is
+  // included verbatim so the operator can read it from run_logs.details.
+  dryRun?: boolean;
+  markdownPreview?: string;
 }
 
 export interface RunDailySummaryJobOptions {
   runDate?: string;
   force?: boolean;
+  // Skip email + Supabase write. Returns the rendered markdown only.
+  dryRun?: boolean;
 }
 
 // On Vercel/AWS Lambda the function filesystem is read-only except for /tmp.
@@ -78,9 +86,27 @@ async function persistToSupabase(runDate: string, markdown: string, emailed: boo
 export async function runDailySummaryJob(options: RunDailySummaryJobOptions = {}): Promise<SummaryJobResult> {
   const runDate = options.runDate ?? todayInNewYork();
   const force = options.force ?? false;
+  const dryRun = options.dryRun ?? false;
   return withRunLog('daily_summary', { runDate, force }, async () => {
     const errors: SummaryJobResult['errors'] = [];
     const markdown = await renderDailySummary(runDate);
+
+    if (dryRun) {
+      // Operator preview path: skip both email send and Supabase write so
+      // we don't double-email or stomp the canonical row. The full markdown
+      // body is echoed back so an operator can scroll the rendered preview
+      // from /runs without round-tripping to Supabase.
+      return {
+        runDate,
+        emailed: false,
+        persisted: false,
+        dryRun: true,
+        markdownPreview: markdown,
+        reason: 'dry_run',
+        errors
+      };
+    }
+
     const email = await sendEmail({ subject: `Bounce Trader Daily Summary - ${runDate}`, markdown });
     const persisted = await persistToSupabase(runDate, markdown, email.sent, email.reason);
 
