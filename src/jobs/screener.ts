@@ -33,6 +33,10 @@ export interface ScreenerJobResult {
   // Cumulative cost (in USD) of AI calls in this run. Useful for the operator
   // even when the cap is disabled: it answers "what would today have cost".
   aiCostUsdThisRun: number;
+  // PROMPT_VERSION at the time of this run. Persisted on each `analyses` and
+  // `paper_trades` row already, but echoed here so an operator can confirm
+  // from run_logs.details which prompt the run was tied to without joining.
+  promptVersion: string;
   notSettled?: { dataDate: string };
   // Always populated. The dashboard reads this to show provider name, base URL,
   // freshness mode, and the first few vendor errors. On not-settled runs this
@@ -243,6 +247,7 @@ export async function runScreenerJob(options: RunScreenerJobOptions = {}): Promi
           aiCalls: 0,
           aiBudgetExhausted: false,
           aiCostUsdThisRun: 0,
+          promptVersion: env.promptVersion,
           notSettled: { dataDate: err.dataDate },
           diagnostics: err.diagnostics,
           errors: []
@@ -360,6 +365,7 @@ export async function runScreenerJob(options: RunScreenerJobOptions = {}): Promi
       aiCalls,
       aiBudgetExhausted,
       aiCostUsdThisRun,
+      promptVersion: env.promptVersion,
       diagnostics: result.diagnostics,
       errors
     };

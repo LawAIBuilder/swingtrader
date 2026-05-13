@@ -45,6 +45,16 @@ export default async function LoginPage({ searchParams }: SearchParams) {
             {env.adminEmails.length > 0 ? `${env.adminEmails.length} admin email(s) configured` : 'No ADMIN_EMAILS set'}
           </Pill>
         </div>
+        {env.adminEmails.length === 0 ? (
+          <div className="mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900">
+            <strong>Dashboard is currently disabled.</strong> No{' '}
+            <code>ADMIN_EMAILS</code> are configured for this deployment, so
+            every authenticated session is rejected by the middleware. Set the{' '}
+            <code>ADMIN_EMAILS</code> env var (comma-separated) to a list of
+            allowed addresses and redeploy. Until then, sign-in will succeed at
+            the magic-link step but bounce back here on the next request.
+          </div>
+        ) : null}
         {error === 'forbidden' ? (
           <div className="mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900">
             <strong>Not authorized.</strong> The signed-in account is not in the

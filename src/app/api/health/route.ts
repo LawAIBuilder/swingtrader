@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { env, hasPublicSupabaseConfig, hasSupabaseConfig } from '@/lib/env';
+import { polygonBreaker } from '@/lib/market/polygon';
 import { getSupabasePublic } from '@/lib/supabase/public';
 import { todayInNewYork } from '@/lib/utils/dates';
 
@@ -96,6 +97,13 @@ export async function GET() {
     // with measured latency or {ok:false, error} with the truncated supabase
     // error. A failing probe does NOT 500 this endpoint — uptime monitors
     // should still see HTTP 200 with `db.ok=false` and alert on that field.
-    db
+    db,
+    // Process-scoped circuit breaker around Polygon. Only meaningful within
+    // a single function invocation but still useful in dev / dedicated
+    // server deployments to confirm the breaker hasn't gotten stuck open
+    // after a provider blip. `state` is one of closed|open|half_open.
+    breakers: {
+      polygon: polygonBreaker.snapshot()
+    }
   });
 }

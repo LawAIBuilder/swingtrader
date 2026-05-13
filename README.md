@@ -480,12 +480,14 @@ The broad screener defaults to Polygon/Massive grouped daily bars because it is 
 The dashboard now ships with a Supabase Auth magic-link flow plus an
 `ADMIN_EMAILS` allowlist enforced in `src/middleware.ts`. The behavior is:
 
-- **Public**: `/api/health`, `/login`, `/auth/callback`, `/auth/signout`, the
+- **Public**: `/api/health`, `/api/ping` (plain-text liveness for uptime
+  monitors), `/login`, `/auth/callback`, `/auth/signout`, the
   three `/api/jobs/*` endpoints (those are protected by `CRON_SECRET` and a
   per-IP rate limit instead).
 - **Authenticated allowlist**: every other route. Hitting `/`, `/trades`,
-  `/runs`, `/settings`, or `/trades/[id]` without a valid Supabase session for
-  an email in `ADMIN_EMAILS` redirects to `/login` with an explicit reason.
+  `/runs`, `/ops`, `/settings`, or `/trades/[id]` without a valid Supabase
+  session for an email in `ADMIN_EMAILS` redirects to `/login` with an
+  explicit reason.
 - **Anon Supabase reads**: still work for the dashboard views (candidates,
   open/closed trades, run logs). The new `daily_summaries` table is
   authenticated-only at the RLS layer so historical summary bodies never leak

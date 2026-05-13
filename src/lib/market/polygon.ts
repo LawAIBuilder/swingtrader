@@ -1,4 +1,5 @@
 import { env, requireEnv } from '@/lib/env';
+import { CircuitBreaker } from '@/lib/utils/circuit-breaker';
 import { timedFetch } from '@/lib/utils/timed-fetch';
 import type { CorporateActionResult, DailyBar, DividendType, NewsItem, TickerDetails } from '@/types/app';
 import type { MarketDataClient } from './client';
@@ -38,6 +39,16 @@ function normalizeBaseUrl(url: string): string {
   return url.replace(/\/$/, '');
 }
 
+// Process-scoped breaker. After 5 consecutive request() failures we treat the
+// provider as down and short-circuit subsequent calls for 30s. The screener
+// fans out hundreds of per-ticker requests in a single tick, so this prevents
+// burning the whole budget retrying a dead provider. Cron processes are
+// short-lived; persistence across invocations is intentionally not modeled.
+export const polygonBreaker = new CircuitBreaker('polygon', {
+  failureThreshold: 5,
+  cooldownMs: 30_000
+});
+
 export class PolygonClient implements MarketDataClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -48,6 +59,11 @@ export class PolygonClient implements MarketDataClient {
   }
 
   private async request<T>(path: string, params: Record<string, string | number | boolean | undefined> = {}): Promise<PolygonResponse<T>> {
+    // Fast-fail when the breaker is open. The error surface here propagates
+    // up the same way as any other Polygon error, so the existing
+    // MarketDataNotSettledError / job-locked branches still apply.
+    polygonBreaker.ensureCanPass();
+
     const url = new URL(`${this.baseUrl}${path}`);
     for (const [key, value] of Object.entries(params)) {
       if (value != null && value !== '') url.searchParams.set(key, String(value));
@@ -80,6 +96,7 @@ export class PolygonClient implements MarketDataClient {
           }
           throw new Error(`Polygon request failed ${res.status} ${path}: ${message}`);
         }
+        polygonBreaker.recordSuccess();
         return json;
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
@@ -89,6 +106,7 @@ export class PolygonClient implements MarketDataClient {
         await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
       }
     }
+    polygonBreaker.recordFailure();
     throw lastError ?? new Error('Polygon request failed');
   }
 
