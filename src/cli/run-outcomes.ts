@@ -1,9 +1,15 @@
+import { isValidRunDate } from '@/app/api/_jobRequest';
 import { runOutcomeTrackerJob } from '@/jobs/outcomes';
 import { JobLockedError } from '@/lib/run-log';
 
 const args = process.argv.slice(2);
 const force = args.includes('--force');
 const runDate = args.find((a) => !a.startsWith('--'));
+
+if (runDate != null && !isValidRunDate(runDate)) {
+  console.error(`Invalid runDate: '${runDate}'. Must be YYYY-MM-DD.`);
+  process.exit(2);
+}
 
 try {
   const result = await runOutcomeTrackerJob({ runDate, force });
