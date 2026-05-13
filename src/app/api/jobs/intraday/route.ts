@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { isAuthorizedCron } from '@/app/api/_auth';
+import { isAuthorizedCron, unauthorizedResponse } from '@/app/api/_auth';
 import { jobErrorResponse } from '@/app/api/_jobRequest';
 import { rateLimitOk } from '@/app/api/_rateLimit';
 import { runIntradayTickJob } from '@/jobs/intraday';
@@ -16,7 +16,7 @@ async function handle(req: NextRequest) {
     return NextResponse.json({ error: 'rate_limited' }, { status: 429 });
   }
   if (!isAuthorizedCron(req)) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    return unauthorizedResponse();
   }
   try {
     const result = await runIntradayTickJob();

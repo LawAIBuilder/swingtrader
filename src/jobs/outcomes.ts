@@ -5,6 +5,7 @@ import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { todayInNewYork } from '@/lib/utils/dates';
 import { round } from '@/lib/utils/numbers';
 import { withRunLog } from '@/lib/run-log';
+import { recordWashSaleLockoutIfLoss } from '@/lib/wash-sale';
 import type { DailyBar, FinalizedPaperTrade, PaperTradeRow } from '@/types/app';
 import type { MarketDataClient } from '@/lib/market/client';
 
@@ -126,6 +127,7 @@ async function applyDayBar(trade: FinalizedPaperTrade, bar: DailyBar): Promise<A
       })
       .eq('id', trade.id);
     if (updateError) throw updateError;
+    await recordWashSaleLockoutIfLoss(trade.ticker, bar.date, sim.pnlPctNet);
     return { closed: true, ambiguous: sim.isAmbiguous };
   }
 

@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { isAuthorizedCron } from '@/app/api/_auth';
+import { isAuthorizedCron, unauthorizedResponse } from '@/app/api/_auth';
 import { rateLimitOk } from '@/app/api/_rateLimit';
 import { getBrokerClient } from '@/lib/broker/provider';
 import { env } from '@/lib/env';
@@ -9,6 +9,11 @@ import { writeRunLog } from '@/lib/run-log';
 // disabled rather than silently no-op so the operator gets a clear signal.
 // This route is intentionally NOT mounted on a Vercel cron schedule. It is
 // meant for explicit manual or alerting-driven invocations only.
+//
+// As of the fail-closed sweep, this route inherits the same default as the
+// /api/jobs/* family: a missing CRON_SECRET is a 401, regardless of the
+// ALLOW_UNAUTHENTICATED_CRON dev flag, because cancel-all is destructive
+// even in dev.
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
@@ -16,19 +21,22 @@ async function handle(req: NextRequest) {
   if (!rateLimitOk(req)) {
     return NextResponse.json({ error: 'rate_limited' }, { status: 429 });
   }
-  // Defense in depth for a destructive endpoint: even when CRON_SECRET is
-  // unset (which makes the read-only job endpoints open for local dev),
-  // cancel-all is never callable without an explicit secret. Without this
-  // a fresh deploy with BROKER_MODE=paper but no CRON_SECRET could let a
-  // public actor wipe every paper order with one HTTP call.
+  // Destructive endpoint: never trust ALLOW_UNAUTHENTICATED_CRON here.
+  // Even local dev should set CRON_SECRET before enabling broker cancel-all,
+  // and a forgotten secret in any environment must fail closed.
   if (!env.cronSecret) {
     return NextResponse.json(
-      { error: 'cron_secret_required', detail: 'Set CRON_SECRET before enabling broker cancel-all.' },
+      {
+        error: 'cron_secret_required',
+        detail:
+          'Set CRON_SECRET before enabling broker cancel-all. ' +
+          'ALLOW_UNAUTHENTICATED_CRON does not apply to destructive endpoints.'
+      },
       { status: 401 }
     );
   }
   if (!isAuthorizedCron(req)) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    return unauthorizedResponse();
   }
   if (env.brokerMode === 'disabled') {
     return NextResponse.json(

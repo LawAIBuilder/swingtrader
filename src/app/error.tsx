@@ -8,9 +8,14 @@ import { useEffect } from 'react';
 // don't want to leak internals on a public deploy.
 export default function ErrorPage({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   useEffect(() => {
+    // Client-side: we cannot import the server-only structured logger here
+    // (it's bundled either way, but we keep the shape consistent so a
+    // log search across server + client traces still matches).
     console.error(JSON.stringify({
+      level: 'error',
+      time: new Date().toISOString(),
       event: 'app_error_boundary',
-      message: error.message,
+      errorMessage: error.message,
       digest: error.digest ?? null
     }));
   }, [error]);

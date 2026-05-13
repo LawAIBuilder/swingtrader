@@ -5,11 +5,25 @@ import { env } from '@/lib/env';
 import { runScreenerJob } from '@/jobs/screener';
 import { runOutcomeTrackerJob } from '@/jobs/outcomes';
 import { runDailySummaryJob } from '@/jobs/summary';
+import { errorFields, logError, logInfo } from '@/lib/log';
 import { JobLockedError } from '@/lib/run-log';
 import { todayInNewYork } from '@/lib/utils/dates';
 
 function verifyCronSecret(req: express.Request, res: express.Response, nextFn: express.NextFunction) {
-  if (!env.cronSecret) return nextFn();
+  // Mirrors src/app/api/_auth.ts: fail closed by default. The legacy
+  // unauthenticated-when-secret-unset behavior is now opt-in via
+  // ALLOW_UNAUTHENTICATED_CRON for local dev only.
+  if (!env.cronSecret) {
+    if (env.allowUnauthenticatedCron) {
+      nextFn();
+      return;
+    }
+    res.status(401).json({
+      error: 'cron_secret_required',
+      detail: 'Set CRON_SECRET, or ALLOW_UNAUTHENTICATED_CRON=true for local dev.'
+    });
+    return;
+  }
   const querySecret = typeof req.query.secret === 'string' ? req.query.secret : undefined;
   const auth = req.header('authorization');
   let bearer: string | undefined;
@@ -49,12 +63,7 @@ function sendJobError(res: express.Response, jobName: string, runDate: string | 
     return;
   }
   const message = err instanceof Error ? err.message : String(err);
-  console.error(JSON.stringify({
-    event: 'job_route_failure',
-    job: jobName,
-    runDate: runDate ?? null,
-    error: message
-  }));
+  logError('job_route_failure', { job: jobName, runDate: runDate ?? null, ...errorFields(err) });
   res.status(500).json({ error: message });
 }
 
@@ -108,48 +117,35 @@ async function main() {
   }
 
   app.listen(env.port, () => {
-    console.log(`Bounce Trader listening on port ${env.port}`);
-    console.log(`Cron enabled: ${env.enableCron}; timezone: ${env.timezone}`);
+    logInfo('server_listening', { port: env.port, cron: env.enableCron, timezone: env.timezone });
   });
+
+  function scheduleJob(jobName: string, schedule: string, run: () => Promise<unknown>) {
+    cron.schedule(schedule, () => {
+      run()
+        .then((result) => logInfo('cron_job_done', { job: jobName, result }))
+        .catch((e) => {
+          if (e instanceof JobLockedError) {
+            logInfo('cron_job_skipped', { job: jobName, reason: e.reason });
+          } else {
+            logError('cron_job_failed', { job: jobName, ...errorFields(e) });
+          }
+        });
+    }, { timezone: env.timezone });
+  }
 
   if (env.enableCron) {
     // Screener runs after the regular session close. The exact UTC offset is
     // whatever the configured timezone resolves to (DST-aware via node-cron).
     // Vercel Cron, by contrast, runs the same routes at fixed UTC times; see
     // vercel.json for that path.
-    cron.schedule('15 16 * * 1-5', () => {
-      runScreenerJob().then((r) => console.log('screener done', r)).catch((e) => {
-        if (e instanceof JobLockedError) {
-          console.log('screener skipped', { reason: e.reason });
-        } else {
-          console.error('screener failed', e);
-        }
-      });
-    }, { timezone: env.timezone });
-
-    cron.schedule('0 17 * * 1-5', () => {
-      runOutcomeTrackerJob().then((r) => console.log('outcomes done', r)).catch((e) => {
-        if (e instanceof JobLockedError) {
-          console.log('outcomes skipped', { reason: e.reason });
-        } else {
-          console.error('outcomes failed', e);
-        }
-      });
-    }, { timezone: env.timezone });
-
-    cron.schedule('30 17 * * 1-5', () => {
-      runDailySummaryJob().then((r) => console.log('summary done', r)).catch((e) => {
-        if (e instanceof JobLockedError) {
-          console.log('summary skipped', { reason: e.reason });
-        } else {
-          console.error('summary failed', e);
-        }
-      });
-    }, { timezone: env.timezone });
+    scheduleJob('screener', '15 16 * * 1-5', () => runScreenerJob());
+    scheduleJob('outcome_tracker', '0 17 * * 1-5', () => runOutcomeTrackerJob());
+    scheduleJob('daily_summary', '30 17 * * 1-5', () => runDailySummaryJob());
   }
 }
 
 main().catch((err) => {
-  console.error(err);
+  logError('server_boot_failed', errorFields(err));
   process.exit(1);
 });

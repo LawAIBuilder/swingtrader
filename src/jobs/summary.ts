@@ -2,6 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { sendEmail } from '@/lib/email/send';
 import { renderDailySummary } from '@/lib/email/summary';
+import { errorFields, logError } from '@/lib/log';
 import { withRunLog } from '@/lib/run-log';
 import { hasSupabaseConfig } from '@/lib/env';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
@@ -64,12 +65,12 @@ async function persistToSupabase(runDate: string, markdown: string, emailed: boo
       { onConflict: 'run_date' }
     );
     if (error) {
-      console.error('Failed to persist daily_summary', error);
+      logError('daily_summary_persist_failed', { runDate, supabaseError: error.message });
       return false;
     }
     return true;
   } catch (err) {
-    console.error('daily_summary persistence threw', err);
+    logError('daily_summary_persist_threw', { runDate, ...errorFields(err) });
     return false;
   }
 }

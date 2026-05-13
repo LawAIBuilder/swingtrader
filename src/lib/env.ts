@@ -111,6 +111,7 @@ const EnvSchema = z.object({
   ADMIN_EMAILS: z.string().optional(),
   DASHBOARD_AUTH_REQUIRED: z.string().optional(),
   JOB_RATE_LIMIT_PER_MINUTE: z.string().optional(),
+  ALLOW_UNAUTHENTICATED_CRON: z.string().optional(),
 
   TRADING_MODE: z.string().optional(),
   INTRADAY_PROVIDER: z.string().optional(),
@@ -240,6 +241,11 @@ export const env = {
   // In-memory token bucket per IP. Best-effort only; a real deploy behind
   // multiple serverless instances should replace this with Upstash/KV.
   jobRateLimitPerMinute: parseNum(raw.JOB_RATE_LIMIT_PER_MINUTE, 30),
+  // Dev-only escape hatch. When CRON_SECRET is unset AND this is true,
+  // unauthenticated cron callers are allowed (legacy Express behavior).
+  // Production must keep this false. The default of false is the entire
+  // point: a fresh deploy that forgot CRON_SECRET fails closed.
+  allowUnauthenticatedCron: parseBool(raw.ALLOW_UNAUTHENTICATED_CRON, false),
 
   // Intraday paper mode (PR 7). Disabled by default. When TRADING_MODE
   // includes 'intraday_paper', the intraday tick job is reachable; live

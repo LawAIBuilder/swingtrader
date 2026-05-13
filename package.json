@@ -15,6 +15,7 @@
     "jobs:summary": "tsx src/cli/run-summary.ts",
     "jobs:intraday": "tsx src/cli/run-intraday-tick.ts",
     "jobs:broker-recon": "tsx src/cli/run-broker-recon.ts",
+    "jobs:retention": "tsx src/cli/run-retention.ts",
     "smoke:historical": "tsx src/cli/smoke-historical.ts",
     "smoke:provider": "tsx src/cli/smoke-provider.ts",
     "typecheck": "tsc --noEmit",

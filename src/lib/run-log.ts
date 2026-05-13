@@ -1,4 +1,5 @@
 import { env } from '@/lib/env';
+import { errorFields, logError } from '@/lib/log';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { todayInNewYork } from '@/lib/utils/dates';
 
@@ -37,13 +38,7 @@ const PG_UNIQUE_VIOLATION = '23505';
 // missing on Vercel, Supabase unreachable). Prints a single structured line to
 // stderr so Vercel runtime logs at least show the cron tick happened.
 function logBootFailure(jobName: string, runDate: string, err: unknown): void {
-  const message = err instanceof Error ? err.message : String(err);
-  console.error(JSON.stringify({
-    event: 'run_log_boot_failure',
-    job: jobName,
-    runDate,
-    error: message
-  }));
+  logError('run_log_boot_failure', { job: jobName, runDate, ...errorFields(err) });
 }
 
 // Used by callers (CLI/HTTP) that need a public, non-throwing write path. The
@@ -66,7 +61,7 @@ export async function writeRunLog(args: {
       finished_at: new Date().toISOString()
     });
     if (error) {
-      console.error('Failed to write run log', error);
+      logError('run_log_write_failed', { job: args.jobName, status: args.status, supabaseError: error.message });
     }
   } catch (err) {
     logBootFailure(args.jobName, args.runDate ?? todayInNewYork(), err);
@@ -98,7 +93,7 @@ async function reapStaleRunningRows(runDate: string, jobName: string, staleMs: n
     .eq('status', 'running')
     .lt('ran_at', cutoff);
   if (error) {
-    console.error('Failed to reap stale run_logs row', error);
+    logError('run_log_reap_failed', { runDate, jobName, supabaseError: error.message });
   }
 }
 
@@ -184,7 +179,7 @@ async function logSkippedRun(runDate: string, jobName: string, reason: string, a
         details: { reason },
         finished_at: new Date().toISOString()
       });
-    if (error) console.error('Failed to write skipped run_logs row', error);
+    if (error) logError('run_log_skipped_write_failed', { runDate, jobName, supabaseError: error.message });
   } catch (err) {
     logBootFailure(jobName, runDate, err);
   }
@@ -207,7 +202,7 @@ async function markRowComplete(rowId: number, status: Exclude<RunStatus, 'runnin
     .eq('id', rowId)
     .eq('status', 'running');
   if (error) {
-    console.error('Failed to update run_logs lifecycle row', error);
+    logError('run_log_lifecycle_update_failed', { rowId, status, supabaseError: error.message });
   }
 }
 

@@ -1,5 +1,6 @@
 import { hasPublicSupabaseConfig, env } from '@/lib/env';
 import { fetchPnlPerDay, type SystemState } from '@/lib/dashboard/data';
+import { logError } from '@/lib/log';
 import { getSupabasePublic } from '@/lib/supabase/public';
 import { getSupabaseAuthBT } from '@/lib/supabase/server';
 import { evaluateExecutionGate, maxDrawdownFromDailyPnl, type ExecutionGateStatus } from './gate';
@@ -9,6 +10,11 @@ export interface ExecutionStatus {
   gate: ExecutionGateStatus;
   halts: ActiveHalt[];
   brokerMode: 'disabled' | 'paper';
+  // View name -> truncated error message. Surfaced inline on /execution so a
+  // partial Supabase outage is observable rather than rendered as a wrong
+  // gate result. The dashboard treats a non-empty errors map as "treat
+  // recon-clean-days as 0 and don't blame the operator".
+  errors: Record<string, string>;
 }
 
 interface BasicStatRow {
@@ -39,8 +45,37 @@ function countCleanReconDays(rows: Array<{ day: string; cleanDay: boolean }>): n
   return count;
 }
 
+// Defensive promise wrapper. Any thrown supabase call (network, auth)
+// becomes an entry in the errors map instead of bubbling out.
+//
+// supabase-js returns PromiseLike<PostgrestSingleResponse<unknown[]>>; we
+// don't have generated DB types for this project so the column types are
+// `unknown`. The cast at the boundary is intentional and confined to this
+// helper. Callers narrow with their own row interfaces.
+async function safeQuery<T>(
+  name: string,
+  factory: () => PromiseLike<{ data: unknown; error: { message: string } | null }>,
+  errors: Record<string, string>,
+  fallback: T
+): Promise<T> {
+  try {
+    const r = await factory();
+    if (r.error) {
+      errors[name] = r.error.message.slice(0, 200);
+      return fallback;
+    }
+    return (r.data as T | null) ?? fallback;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    errors[name] = msg.slice(0, 200);
+    logError('execution_status_query_failed', { view: name, errorMessage: msg.slice(0, 200) });
+    return fallback;
+  }
+}
+
 export async function fetchExecutionStatus(systemState: SystemState): Promise<ExecutionStatus> {
   const halts: ActiveHalt[] = [];
+  const errors: Record<string, string> = {};
   const baseHaltInputs = {
     todayNetPnl: null as number | null,
     openPaperTradesCount: 0,
@@ -65,7 +100,8 @@ export async function fetchExecutionStatus(systemState: SystemState): Promise<Ex
     return {
       gate,
       halts: evaluateHalts(baseHaltInputs, env.haltLimits),
-      brokerMode: env.brokerMode
+      brokerMode: env.brokerMode,
+      errors
     };
   }
 
@@ -74,27 +110,48 @@ export async function fetchExecutionStatus(systemState: SystemState): Promise<Ex
   // operator is signed out, this falls back to anon and returns zero rows
   // (cleanReconDays gracefully reports 0).
   const authClient = await getSupabaseAuthBT();
-  const [tier, baselines, openTrades, pnlSeries, brokerOrders] = await Promise.all([
-    supabase.from('v_basic_stats_by_tier').select('group_key,closed_trades,avg_pnl_net').then((r) => ({
-      data: (r.data ?? []) as BasicStatRow[],
-      error: r.error
-    })),
-    supabase.from('v_baseline_stats').select('group_key,avg_pnl_net').then((r) => ({
-      data: (r.data ?? []) as BaselineRow[],
-      error: r.error
-    })),
-    supabase.from('paper_trades').select('id', { count: 'exact', head: true }).eq('status', 'open'),
+
+  const [tierData, baselineData, openTradesCountResult, pnlSeries, brokerOrderData] = await Promise.all([
+    safeQuery<BasicStatRow[]>(
+      'v_basic_stats_by_tier',
+      () => supabase.from('v_basic_stats_by_tier').select('group_key,closed_trades,avg_pnl_net'),
+      errors,
+      []
+    ),
+    safeQuery<BaselineRow[]>(
+      'v_baseline_stats',
+      () => supabase.from('v_baseline_stats').select('group_key,avg_pnl_net'),
+      errors,
+      []
+    ),
+    (async () => {
+      try {
+        return await supabase.from('paper_trades').select('id', { count: 'exact', head: true }).eq('status', 'open');
+      } catch (err) {
+        errors['paper_trades.count'] = err instanceof Error ? err.message.slice(0, 200) : 'unknown';
+        return { count: 0, data: null, error: null } as { count: number | null; data: null; error: null };
+      }
+    })(),
     fetchPnlPerDay(60),
-    authClient
-      .from('broker_orders')
-      .select('reconciliation_status,reconciled_at')
-      .order('reconciled_at', { ascending: false })
-      .limit(500)
-      .then((r) => ({
-        data: (r.data ?? []) as BrokerOrderCountRow[],
-        error: r.error
-      }))
+    safeQuery<BrokerOrderCountRow[]>(
+      'broker_orders',
+      () =>
+        authClient
+          .from('broker_orders')
+          .select('reconciliation_status,reconciled_at')
+          .order('reconciled_at', { ascending: false })
+          .limit(500),
+      errors,
+      []
+    )
   ]);
+
+  // Re-shape into the "{ data }" wrappers the rest of the function expected
+  // so the existing reducer logic keeps working.
+  const tier = { data: tierData };
+  const baselines = { data: baselineData };
+  const openTrades = openTradesCountResult;
+  const brokerOrders = { data: brokerOrderData };
 
   const tierRow = tier.data.find((r) => r.group_key === 'BUY');
   const baselineRow = baselines.data.find((r) => r.group_key === 'rules_only');
@@ -146,5 +203,5 @@ export async function fetchExecutionStatus(systemState: SystemState): Promise<Ex
 
   halts.push(...evaluateHalts(haltInputs, env.haltLimits));
 
-  return { gate, halts, brokerMode: env.brokerMode };
+  return { gate, halts, brokerMode: env.brokerMode, errors };
 }

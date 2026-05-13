@@ -2,10 +2,13 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { isAuthorizedCron, unauthorizedResponse } from '@/app/api/_auth';
 import { jobErrorResponse, readJobInvocation } from '@/app/api/_jobRequest';
 import { rateLimitOk } from '@/app/api/_rateLimit';
-import { runOutcomeTrackerJob } from '@/jobs/outcomes';
+import { runRetentionJob } from '@/jobs/retention';
 
+// Cleans up old run_logs and intraday_progression rows. Designed for
+// once-a-day or once-a-week external scheduling. Idempotent: re-running it
+// the same day is safe.
 export const runtime = 'nodejs';
-export const maxDuration = 300;
+export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 async function handle(req: NextRequest) {
@@ -17,10 +20,10 @@ async function handle(req: NextRequest) {
   }
   const invocation = await readJobInvocation(req);
   try {
-    const result = await runOutcomeTrackerJob(invocation);
+    const result = await runRetentionJob(invocation);
     return NextResponse.json(result);
   } catch (err) {
-    return jobErrorResponse('outcome_tracker', invocation.runDate, err);
+    return jobErrorResponse('retention', invocation.runDate, err);
   }
 }
 

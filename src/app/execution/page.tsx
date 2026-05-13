@@ -25,8 +25,21 @@ export default async function ExecutionPage() {
     fetchRecentIntradayTrades(10)
   ]);
 
+  const queryErrors = Object.entries(status.errors);
+
   return (
     <main className="mx-auto max-w-5xl space-y-6 p-6">
+      {queryErrors.length > 0 ? (
+        <Card title="Execution-status query errors" subtitle="Some inputs to the gate failed to load. The gate's verdict treats those as zero-evidence.">
+          <ul className="space-y-1 text-xs font-mono text-rose-800">
+            {queryErrors.map(([view, msg]) => (
+              <li key={view}>
+                <span className="font-semibold">{view}</span>: {msg}
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : null}
       <Card
         title="Live execution gate"
         subtitle="Reports whether the system would be allowed to flip on live orders. Live orders are unconditionally disabled in this build."

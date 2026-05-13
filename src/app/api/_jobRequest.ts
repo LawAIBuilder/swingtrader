@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server';
+import { errorFields, logError } from '@/lib/log';
 import { JobLockedError } from '@/lib/run-log';
 
 export interface JobInvocation {
@@ -35,11 +36,6 @@ export function jobErrorResponse(jobName: string, runDate: string | undefined, e
     );
   }
   const message = err instanceof Error ? err.message : String(err);
-  console.error(JSON.stringify({
-    event: 'job_route_failure',
-    job: jobName,
-    runDate: runDate ?? null,
-    error: message
-  }));
+  logError('job_route_failure', { job: jobName, runDate: runDate ?? null, ...errorFields(err) });
   return NextResponse.json({ error: message }, { status: 500 });
 }
