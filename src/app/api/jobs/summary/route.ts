@@ -15,7 +15,12 @@ async function handle(req: NextRequest) {
   if (!isAuthorizedCron(req)) {
     return unauthorizedResponse();
   }
-  const invocation = await readJobInvocation(req);
+  let invocation;
+  try {
+    invocation = await readJobInvocation(req);
+  } catch (err) {
+    return jobErrorResponse('daily_summary', undefined, err);
+  }
   // Summary-specific knob: `dryRun=true` renders the markdown without
   // sending email or upserting daily_summaries. Useful for previewing a
   // changed renderDailySummary without paging the operator.

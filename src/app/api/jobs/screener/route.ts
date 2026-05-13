@@ -18,7 +18,12 @@ async function handle(req: NextRequest) {
   if (!isAuthorizedCron(req)) {
     return unauthorizedResponse();
   }
-  const invocation = await readJobInvocation(req);
+  let invocation;
+  try {
+    invocation = await readJobInvocation(req);
+  } catch (err) {
+    return jobErrorResponse('screener', undefined, err);
+  }
   try {
     const result = await runScreenerJob(invocation);
     return NextResponse.json(result);

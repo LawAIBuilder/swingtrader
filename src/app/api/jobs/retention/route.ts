@@ -18,7 +18,12 @@ async function handle(req: NextRequest) {
   if (!isAuthorizedCron(req)) {
     return unauthorizedResponse();
   }
-  const invocation = await readJobInvocation(req);
+  let invocation;
+  try {
+    invocation = await readJobInvocation(req);
+  } catch (err) {
+    return jobErrorResponse('retention', undefined, err);
+  }
   try {
     const result = await runRetentionJob(invocation);
     return NextResponse.json(result);
