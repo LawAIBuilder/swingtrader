@@ -141,14 +141,26 @@ curl -X POST http://localhost:3000/jobs/screener \
 
 The legacy `x-cron-secret: $CRON_SECRET` header is also accepted.
 
+> **Fail-closed posture.** If `CRON_SECRET` is unset, all `/api/jobs/*` and
+> `/api/broker/*` routes return 401 by default. This is the inverse of the
+> original Express behavior. To opt out for local dev only, set
+> `ALLOW_UNAUTHENTICATED_CRON=true`. In production, never set that flag.
+> `/api/broker/cancel-all` always requires `CRON_SECRET` and ignores
+> `ALLOW_UNAUTHENTICATED_CRON` — the action is destructive in any environment.
+
 Available endpoints:
 
 - `POST /jobs/screener`
 - `POST /jobs/outcomes`
 - `POST /jobs/summary`
+- `POST /jobs/intraday` (only when `TRADING_MODE` includes `intraday_paper`)
+- `POST /jobs/broker-recon` (only when `BROKER_MODE=paper`)
+- `POST /jobs/retention` (housekeeping; pruning of `run_logs` and `intraday_progression`)
 - `GET /health`
 
-If `CRON_SECRET` is blank, endpoints are unprotected. Use a secret before deploying.
+If `CRON_SECRET` is blank, endpoints return 401 by default (fail closed). To
+allow unauthenticated dev calls, additionally set `ALLOW_UNAUTHENTICATED_CRON=true`.
+Production must always have `CRON_SECRET` configured.
 
 #### Force-rerunning a job
 
@@ -192,9 +204,11 @@ Cron schedule in `src/server.ts` (DST-aware via `node-cron`'s `timezone` arg):
 
 Vercel cron schedules in `vercel.json` are fixed-UTC instead, since Vercel
 Cron does not honor a TZ field. Default times are `21:15 UTC`, `22:00 UTC`,
-and `22:30 UTC` weekdays — i.e. `5:15/6:00/6:30 PM EDT` during DST and
-`4:15/5:00/5:30 PM EST` outside DST. Both are post-close; the EDT offset is
-the asymmetric case to be aware of.
+and `22:30 UTC` weekdays for screener / outcomes / summary, plus a weekly
+retention sweep at `08:00 UTC Sunday` (`/api/jobs/retention`) that prunes
+old `run_logs` and `intraday_progression` rows. The screener/outcomes/summary
+times are also `4:15/5:00/5:30 PM EST` outside DST. Both are post-close;
+the EDT offset is the asymmetric case to be aware of.
 
 ## Operational runbook (production)
 

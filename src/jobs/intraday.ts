@@ -13,6 +13,12 @@ export interface IntradayTickResult {
   closedThisTick: number;
   rejectedWideSpread: number;
   staleQuotesSkipped: number;
+  // Quote provider returned null (no quote available, market closed, vendor
+  // outage). Tracked separately from staleQuotesSkipped because they imply
+  // different operator actions: a few stale quotes during low-volume hours
+  // are normal, but null quotes across many tickers usually mean the
+  // provider is down.
+  quoteUnavailable: number;
   newlyOpened: number;
   entriesEvaluated: number;
   entriesRejected: Array<{ ticker: string; reason: string }>;
@@ -48,6 +54,7 @@ export async function runIntradayTickJob(): Promise<IntradayTickResult> {
         closedThisTick: 0,
         rejectedWideSpread: 0,
         staleQuotesSkipped: 0,
+        quoteUnavailable: 0,
         newlyOpened: 0,
         entriesEvaluated: 0,
         entriesRejected: [],
@@ -69,11 +76,15 @@ export async function runIntradayTickJob(): Promise<IntradayTickResult> {
     let closedThisTick = 0;
     let rejectedWideSpread = 0;
     let staleQuotesSkipped = 0;
+    let quoteUnavailable = 0;
 
     for (const trade of trades) {
       try {
         const quote = await client.getQuote(trade.ticker);
-        if (!quote) continue;
+        if (!quote) {
+          quoteUnavailable += 1;
+          continue;
+        }
         // Skip processing this trade entirely on stale quotes. We do NOT
         // record a progression row from stale data because that would persist
         // a fake "current" P&L. The next non-stale tick will pick it up.
@@ -171,6 +182,7 @@ export async function runIntradayTickJob(): Promise<IntradayTickResult> {
       closedThisTick,
       rejectedWideSpread,
       staleQuotesSkipped,
+      quoteUnavailable,
       newlyOpened: entry.newlyOpened,
       entriesEvaluated: entry.entriesEvaluated,
       entriesRejected: entry.entriesRejected,
